@@ -1,32 +1,29 @@
 {
-
-  "questionOrder": [70955, 70956, 70962, 70969],
-
-  "keyToQuestionId": {
-
-    "who": 70955,
-
-    "gender": 70956,
-
-    "occasion": 70962,
-
-    "purpose": 70969
-
-  },
-
-  "options": {
-
-    "70955": { "Self": 299504, "Gift": 299505 },
-
-    "70956": { "Female": 299507, "Male": 299506 },
-
-    "70962": { "Engagement": 299533, "Anniversary": 299534 },
-
-    "70969": { "Party-wear": 299568, "Daily-wear": 299567 }
-
-  },
-
-  "defaults": { "email": "", "full_name": "", "phone_number": "", "date": "" }
-
+ "xml_root": "request",
+ "result_key_keys": ["result_key", "response_id", "req_id", "request_id"],
+ "flat_field_maps": {
+   "name":       ["name", "full_name", "customerName"],
+   "email":      ["email", "email_id"],
+   "phone":      ["phone", "phone_number", "mobile"],
+   "birth_date": ["birth_date", "date", "dob"]
+ },
+ "defaults": {
+   "name": "",
+   "email": "",
+   "phone": "",
+   "birth_date": ""
+ },
+ "answers": {
+   "question_to_id": {
+     "who":      70955,
+     "gender":   70956,
+     "occasion": 70962,
+     "purpose":  70969
+   },
+   "label_keys": ["question", "key", "label", "name"],
+   "value_keys": ["answer", "value", "selected", "option"],
+   "option_value_map": {
+     "70956": { "male": 299507, "female": 299506 }  // if backend needs numeric codes
+   }
+ }
 }
- 
