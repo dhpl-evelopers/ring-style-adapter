@@ -1,0 +1,32 @@
+{
+
+  "questionOrder": [70955, 70956, 70962, 70969],
+
+  "keyToQuestionId": {
+
+    "who": 70955,
+
+    "gender": 70956,
+
+    "occasion": 70962,
+
+    "purpose": 70969
+
+  },
+
+  "options": {
+
+    "70955": { "Self": 299504, "Gift": 299505 },
+
+    "70956": { "Female": 299507, "Male": 299506 },
+
+    "70962": { "Engagement": 299533, "Anniversary": 299534 },
+
+    "70969": { "Party-wear": 299568, "Daily-wear": 299567 }
+
+  },
+
+  "defaults": { "email": "", "full_name": "", "phone_number": "", "date": "" }
+
+}
+ 
