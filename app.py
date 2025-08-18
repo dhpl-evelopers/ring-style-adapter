@@ -15,14 +15,32 @@ BACKEND_GET_URL  = os.getenv("BACKEND_GET_URL", "").strip()    # e.g. https://<a
 API_KEY_REQUIRED = os.getenv("API_KEY_REQUIRED", "false").lower() == "true"
 API_KEY          = os.getenv("API_KEY", "")
 # ---------- Mapping config ----------
+# ---------- Mapping config ----------
 CFG_PATH = os.path.join(os.path.dirname(__file__), "mapping.config.json")
-with open(CFG_PATH, "r", encoding="utf-8") as f:
-   CFG = json.load(f)
-XML_ROOT = CFG.get("xml_root", "request")
-FIELD_MAP: Dict[str, str] = {k.lower(): v for k, v in CFG.get("field_map", {}).items()}
-ANS_KEY_TO_Q = CFG.get("answer_key_to_question", {})
-RESULT_KEY_CANDIDATES = [s.lower() for s in CFG.get("result_key_field_candidates", ["result_key", "response_id"])]
-DEFAULTS = CFG.get("defaults", {})
+
+DEFAULT_CFG = {
+    "xml_root": "request",
+    "result_key_field_candidates": ["result_key", "response_id", "responseKey", "resultKey"],
+    "field_map": {
+        "full_name": "name",
+        "name": "name",
+        "email": "email",
+        "phone": "phoneNumber",
+        "phone_number": "phoneNumber",
+        "birth_date": "birth_date",
+        "date": "birth_date"
+    },
+    "answer_key_to_question": {},
+    "defaults": {"name": "", "email": "", "phoneNumber": "", "birth_date": ""}
+}
+
+try:
+    with open(CFG_PATH, "r", encoding="utf-8") as f:
+        CFG = json.load(f)
+except Exception as e:
+    logging.warning("mapping.config.json invalid or missing, using default CFG: %s", e)
+    CFG = DEFAULT_CFG
+
 # ---------- helpers ----------
 def _require_backend_urls():
    if not BACKEND_POST_URL or not BACKEND_GET_URL:
