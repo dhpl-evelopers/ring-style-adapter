@@ -1,29 +1,25 @@
 {
- "xml_root": "request",          // root tag name required by backend
- "result_key_field_candidates": ["result_key","response_id","responseKey","resultKey"],
- // Map UI field names -> backend XML tag names
- "field_map": {
-   "full_name":   "name",
-   "name":        "name",
-   "email":       "email",
-   "phone":       "phoneNumber",
-   "phone_number":"phoneNumber",
-   "birth_date":  "birth_date",
-   "date":        "birth_date"
- },
- // If UI sends "answers" as key/value pairs, map UI keys to backend "question" labels
- // (Only used when answers are not already an array)
- "answer_key_to_question": {
-   "who":      "Q1. Who are you…?",
-   "gender":   "Q2. Gender",
-   "occasion": "Q3. Occasion",
-   "purpose":  "Q4. Purpose"
- },
- // Optional defaults if UI omits fields
- "defaults": {
-   "name": "",
-   "email": "",
-   "phoneNumber": "",
-   "birth_date": ""
- }
+  "xml_root": "request",
+  "result_key_field_candidates": ["result_key", "response_id", "responseKey", "resultKey"],
+  "field_map": {
+    "full_name": "name",
+    "name": "name",
+    "email": "email",
+    "phone": "phoneNumber",
+    "phone_number": "phoneNumber",
+    "birth_date": "birth_date",
+    "date": "birth_date"
+  },
+  "answer_key_to_question": {
+    "who": "Q1. Who are you…?",
+    "gender": "Q2. Gender",
+    "occasion": "Q3. Occasion",
+    "purpose": "Q4. Purpose"
+  },
+  "defaults": {
+    "name": "",
+    "email": "",
+    "phoneNumber": "",
+    "birth_date": ""
+  }
 }
