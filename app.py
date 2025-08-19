@@ -14,59 +14,177 @@ from fastapi import FastAPI, Request, HTTPException, Body, Query
 
 from fastapi.responses import JSONResponse
 
-# ----------------- Logging -----------------
+# --------------------------------------------------------------------
+
+# Logging
+
+# --------------------------------------------------------------------
 
 log = logging.getLogger("adapter")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-# ----------------- FastAPI -----------------
+# --------------------------------------------------------------------
+
+# FastAPI app
+
+# --------------------------------------------------------------------
 
 app = FastAPI(title="Ring Style Adapter (flex → JSON)", version="1.0.0")
 
-# ----------------- Environment -----------------
+# --------------------------------------------------------------------
 
-# e.g. https://<your-api>.azurewebsites.net/createRequestJSON
+# Env vars (set these in Azure > Configuration)
+
+# --------------------------------------------------------------------
+
+# Example: https://<your-backend>.azurewebsites.net/createRequestJSON
 
 BACKEND_POST_URL = os.getenv("BACKEND_POST_URL", "").strip()
+
+# Optional GET (not used by /ingest, but kept for completeness)
+
+BACKEND_GET_URL = os.getenv("BACKEND_GET_URL", "").strip()
+
+# API key guard (optional)
 
 API_KEY_REQUIRED = os.getenv("API_KEY_REQUIRED", "false").lower() == "true"
 
 API_KEY = os.getenv("API_KEY", "")
 
-# ----------------- Config load (mapping.config.json) -----------------
+# --------------------------------------------------------------------
+
+# Config (field mapping). If mapping.config.json is present we use it.
+
+# If not, we fall back to sane defaults that match your backend.
+
+# --------------------------------------------------------------------
 
 CFG_PATH = pathlib.Path(__file__).with_name("mapping.config.json")
 
-def _load_config() -> Dict[str, Any]:
+DEFAULT_CONFIG = {
 
-    try:
+    "xml_root": "request",  # ignored now (JSON), kept for compatibility
 
-        head = CFG_PATH.read_text(encoding="utf-8")[:200]
+    "result_key_field_candidates": ["result_key", "response_id", "responsekey", "resultKey"],
 
-        print("DEBUG - Reading config from:", CFG_PATH)
+    "field_map": {
 
-        print("DEBUG - First 200 chars of config.json:", head)
+        # UI flexible keys  -> backend expected keys
 
-        with CFG_PATH.open("r", encoding="utf-8") as f:
+        "request_id": "request_id",
 
-            return json.load(f)
+        "response_id": "response_id",
 
-    except Exception as e:
+        "result_key": "response_id",
 
-        print("ERROR - Could not read config:", e)
+        "resultkey": "response_id",
 
-        return {}
+        "full_name": "full_name",
+
+        "name": "full_name",
+
+        "email": "email",
+
+        "phone": "phone_number",
+
+        "phone_number": "phone_number",
+
+        "phonenumber": "phone_number",
+
+        "birth_date": "birth_date",
+
+        "date": "birth_date",
+
+    },
+
+    # If UI gives answers as a dict (key -> value), map keys to readable questions:
+
+    "answer_key_to_question": {
+
+        "who": "Q1. Who are you?",
+
+        "gender": "Q2. Gender",
+
+        "occasion": "Q3. Occasion",
+
+        "purpose": "Q4. Purpose",
+
+    },
+
+    "defaults": {
+
+        "request_id": "",
+
+        "response_id": "",
+
+        "full_name": "",
+
+        "email": "",
+
+        "phone_number": "",
+
+        "birth_date": "",
+
+    },
+
+}
+
+def _load_config() -> dict:
+
+    if CFG_PATH.exists():
+
+        try:
+
+            with open(CFG_PATH, "r", encoding="utf-8") as f:
+
+                head = f.read(200)  # also helps debug deployment issues
+
+                log.info("Read mapping.config.json first 200 chars: %s", head)
+
+                f.seek(0)
+
+                cfg = json.load(f)
+
+                # defensive normalization
+
+                cfg.setdefault("field_map", {})
+
+                cfg.setdefault("answer_key_to_question", {})
+
+                cfg.setdefault("result_key_field_candidates", ["result_key", "response_id"])
+
+                cfg.setdefault("defaults", {})
+
+                return cfg
+
+        except Exception as e:
+
+            log.warning("Could not parse mapping.config.json: %s. Using defaults.", e)
+
+    return DEFAULT_CONFIG
 
 CONFIG = _load_config()
 
-# --------------- Helpers -----------------
+FIELD_MAP: Dict[str, str] = {k.lower(): v for k, v in CONFIG.get("field_map", {}).items()}
+
+ANS_KEY_TO_Q: Dict[str, str] = CONFIG.get("answer_key_to_question", {})
+
+RESULT_KEY_CANDIDATES: List[str] = [s.lower() for s in CONFIG.get("result_key_field_candidates", [])]
+
+DEFAULTS: Dict[str, Any] = CONFIG.get("defaults", {})
+
+# --------------------------------------------------------------------
+
+# Small helpers
+
+# --------------------------------------------------------------------
 
 def _require_backend():
 
     if not BACKEND_POST_URL:
 
-        raise HTTPException(status_code=500, detail="BACKEND_POST_URL not configured")
+        raise HTTPException(status_code=500, detail="BACKEND_POST_URL is not configured")
 
 def _check_api_key(req: Request):
 
@@ -74,35 +192,45 @@ def _check_api_key(req: Request):
 
         return
 
-    given = req.headers.get("x-api-key", "")
-
-    if (not API_KEY) or (given != API_KEY):
+    if not API_KEY or req.headers.get("x-api-key") != API_KEY:
 
         raise HTTPException(status_code=401, detail="unauthorized")
 
-def _find_result_key(d: Dict[str, Any], candidates: List[str] = None) -> str:
+def _flatten(obj: Any, prefix: str = "", out: Dict[str, Any] = None) -> Dict[str, Any]:
 
-    if candidates is None:
+    """Flatten nested dict/list into dotted keys for greedy lookup."""
 
-        candidates = CONFIG.get(
+    if out is None:
 
-            "result_key_field_candidates",
+        out = {}
 
-            ["result_key", "response_id", "responseKey", "resultKey"]
+    if isinstance(obj, dict):
 
-        )
+        for k, v in obj.items():
 
-    # direct
+            _flatten(v, f"{prefix}.{k}" if prefix else k, out)
+
+    elif isinstance(obj, list):
+
+        for i, v in enumerate(obj):
+
+            _flatten(v, f"{prefix}[{i}]", out)
+
+    else:
+
+        out[prefix] = obj
+
+    return out
+
+def _extract_result_key(d: Dict[str, Any]) -> str:
+
+    # direct keys
 
     for k in list(d.keys()):
 
-        for c in candidates:
+        if k.lower() in RESULT_KEY_CANDIDATES:
 
-            if k.lower() == c.lower():
-
-                v = d.get(k)
-
-                return "" if v is None else str(v)
+            return str(d[k])
 
     # nested
 
@@ -110,7 +238,7 @@ def _find_result_key(d: Dict[str, Any], candidates: List[str] = None) -> str:
 
         if isinstance(v, dict):
 
-            rk = _find_result_key(v, candidates)
+            rk = _extract_result_key(v)
 
             if rk:
 
@@ -118,179 +246,207 @@ def _find_result_key(d: Dict[str, Any], candidates: List[str] = None) -> str:
 
     return ""
 
-def _flatten(obj: Any, pref: str = "", out: Dict[str, Any] = None) -> Dict[str, Any]:
+def _map_flat_fields(raw: Dict[str, Any]) -> Dict[str, Any]:
 
-    """Flatten nested dicts to "a.b.c": value."""
+    out = dict(DEFAULTS)
 
-    out = out or {}
+    flat = _flatten(raw)
 
-    if isinstance(obj, dict):
+    # take best match from any final segment key
 
-        for k, v in obj.items():
+    for k, v in flat.items():
 
-            _flatten(v, f"{pref}.{k}" if pref else k, out)
+        tail = k.split(".")[-1]
 
-    else:
+        # strip list suffix like key[0]
 
-        out[pref] = obj
+        tail = tail.split("[", 1)[0].lower()
+
+        if tail in FIELD_MAP:
+
+            out[FIELD_MAP[tail]] = v
 
     return out
 
-def _choose_variant(cfg: dict, flat: Dict[str, Any]) -> Tuple[str, dict]:
+def _coerce_str(x: Any) -> str:
+
+    if x is None:
+
+        return ""
+
+    return str(x)
+
+def _build_qna(raw: Dict[str, Any]) -> List[Dict[str, str]]:
 
     """
 
-    Decide which survey variant applies based on 'match' rules in config.
+    Build qna as [{question, answer}, ...] from MANY possible shapes:
+
+      - raw["qna"] already list of {question, answer}
+
+      - raw has arrays: questions[], answers[]
+
+      - raw has "answers" as a dict of simple keys -> values (use ANS_KEY_TO_Q map)
+
+      - raw has an array of objects with "question"/"selectedOption"/"value" etc.
 
     """
 
-    surveys = cfg.get("surveys", {})
+    # 1) Already correct
 
-    for name, sdef in surveys.items():
+    if isinstance(raw.get("qna"), list) and raw["qna"] and isinstance(raw["qna"][0], dict):
 
-        match = sdef.get("match", {})
+        out = []
 
-        ok = True
+        for item in raw["qna"]:
 
-        for k, vals in match.items():
+            q = _coerce_str(item.get("question"))
 
-            v = str(flat.get(k.lower(), "")).lower()
+            a = _coerce_str(item.get("answer"))
 
-            if not any(v == str(x).lower() for x in vals):
+            if q or a:
 
-                ok = False
+                out.append({"question": q, "answer": a})
 
-                break
+        return out
 
-        if ok:
+    # 2) Parallel arrays: questions[], answers[]
 
-            return name, sdef
+    if isinstance(raw.get("questions"), list) and isinstance(raw.get("answers"), list):
 
-    # fallback: first defined survey if any
+        qs = [ _coerce_str(x) for x in raw["questions"] ]
 
-    if surveys:
+        ans = [ _coerce_str(x) for x in raw["answers"] ]
 
-        name, sdef = next(iter(surveys.items()))
+        n = max(len(qs), len(ans))
 
-        return name, sdef
+        out = []
 
-    return "", {}
+        for i in range(n):
+
+            q = qs[i] if i < len(qs) else ""
+
+            a = ans[i] if i < len(ans) else ""
+
+            if q or a:
+
+                out.append({"question": q, "answer": a})
+
+        if out:
+
+            return out
+
+    # 3) answers is a dict {key: value} -> use ANS_KEY_TO_Q
+
+    if isinstance(raw.get("answers"), dict):
+
+        out = []
+
+        for k, v in raw["answers"].items():
+
+            q = ANS_KEY_TO_Q.get(k, k)  # fall back to key name
+
+            out.append({"question": _coerce_str(q), "answer": _coerce_str(v)})
+
+        if out:
+
+            return out
+
+    # 4) answers is a list of objects (selectedOption/value style)
+
+    if isinstance(raw.get("answers"), list) and raw["answers"] and isinstance(raw["answers"][0], dict):
+
+        out = []
+
+        for idx, obj in enumerate(raw["answers"]):
+
+            q = _coerce_str(obj.get("question") or obj.get("label") or f"Q{idx+1}")
+
+            a = _coerce_str(
+
+                obj.get("answer")
+
+                or obj.get("selectedOption", {}).get("value")
+
+                or obj.get("value")
+
+                or obj.get("text")
+
+                or obj.get("choice")
+
+            )
+
+            out.append({"question": q, "answer": a})
+
+        if out:
+
+            return out
+
+    # 5) Nothing matched – empty
+
+    return []
 
 def _normalize_to_backend_json(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     """
 
-    Convert free-form UI JSON into backend's expected JSON for /createRequestJSON.
+    Normalize flexible UI JSON to the backend JSON schema:
 
-    Uses CONFIG.surveys to map and order questions/answers, padding missing values.
+    {
 
-    """
+      "request_id": "...",
 
-    # Build lower-cased flat lookup for variant detection
+      "response_id": "...",
 
-    flat_raw = {k.lower(): (str(v).lower() if isinstance(v, str) else v)
+      "full_name": "...",
 
-                for k, v in _flatten(raw).items()}
+      "email": "...",
 
-    # Pick a survey variant
+      "phone_number": "...",
 
-    variant_name, survey = _choose_variant(CONFIG, flat_raw)
+      "birth_date": "...",
 
-    log.info("Variant selected: %s", variant_name or "<none>")
-
-    # Identity fields (with a few common fallbacks)
-
-    request_id = _find_result_key(raw) or raw.get("request_id", "")
-
-    name = (raw.get("name") or raw.get("full_name") or "").strip()
-
-    email = (raw.get("email") or "").strip()
-
-    phone = (raw.get("phoneNumber") or raw.get("phone_number") or raw.get("phone") or "")
-
-    birth_date = raw.get("birth_date") or raw.get("date") or ""
-
-    # Questions mapping from variant
-
-    questions: List[str] = list(survey.get("questions", []))
-
-    answer_keys: Dict[str, str] = survey.get("answer_keys", {})
-
-    pad_val = survey.get("missing_answer_value", "null")
-
-    # Where answers might be present
-
-    answers_dict: Dict[str, Any] = raw.get("answers", {}) if isinstance(raw.get("answers"), dict) else {}
-
-    out_answers: List[str] = []
-
-    for q in questions:
-
-        # find the UI key mapped to this question
-
-        ui_key = None
-
-        for k, qname in answer_keys.items():
-
-            if qname == q:
-
-                ui_key = k
-
-                break
-
-        val = None
-
-        if ui_key:
-
-            if ui_key in answers_dict:
-
-                val = answers_dict.get(ui_key)
-
-            elif ui_key in raw:
-
-                val = raw.get(ui_key)
-
-        if val is None or val == "":
-
-            val = pad_val
-
-        out_answers.append(str(val))
-
-    # Apply defaults if configured (won't overwrite already found values)
-
-    defaults = CONFIG.get("defaults", {})
-
-    request_id = request_id or defaults.get("request_id", "")
-
-    name       = name       or defaults.get("name", "")
-
-    email      = email      or defaults.get("email", "")
-
-    phone      = phone      or defaults.get("phoneNumber", "")
-
-    birth_date = birth_date or defaults.get("birth_date", "")
-
-    normalized = {
-
-        "request_id": request_id,
-
-        "email": email,
-
-        "name": name,
-
-        "phoneNumber": phone,
-
-        "birth_date": birth_date,
-
-        "questions": questions,
-
-        "answers": out_answers
+      "qna": [{ "question": "...", "answer": "..." }]
 
     }
 
-    return normalized
+    """
 
-# ----------------- Routes -----------------
+    base = _map_flat_fields(raw)
+
+    # If request_id empty but we can find a result_key, copy it
+
+    if not base.get("request_id"):
+
+        base["request_id"] = _extract_result_key(raw)
+
+    # response_id should exist; default to request_id if missing
+
+    rid = base.get("response_id")
+
+    if not rid:
+
+        base["response_id"] = base.get("request_id", "")
+
+    # Ensure required keys exist
+
+    for k in ["full_name", "email", "phone_number", "birth_date"]:
+
+        base.setdefault(k, "")
+
+    # Build qna
+
+    qna = _build_qna(raw)
+
+    base["qna"] = qna
+
+    return base
+
+# --------------------------------------------------------------------
+
+# Routes
+
+# --------------------------------------------------------------------
 
 @app.get("/")
 
@@ -300,11 +456,13 @@ def root():
 
         "ok": True,
 
-        "version": "1.0.0",
+        "expects": "JSON for /createRequestJSON",
 
-        "has_backend_post_url": bool(BACKEND_POST_URL),
+        "post_url_configured": bool(BACKEND_POST_URL),
 
-        "api_key_required": API_KEY_REQUIRED
+        "requires_api_key": API_KEY_REQUIRED,
+
+        "version": app.version,
 
     }
 
@@ -324,73 +482,49 @@ async def ingest(
 
     echo: bool = Query(False, description="Return backend status + body"),
 
-    req: Request = None
+    req: Request = None,
 
 ):
 
-    """
-
-    Accept flexible UI JSON, normalize to backend expected JSON.
-
-    If preview=true -> return normalized only.
-
-    Otherwise POST to BACKEND_POST_URL (/createRequestJSON) and return backend result.
-
-    """
-
     _check_api_key(req)
 
-    try:
+    if not isinstance(raw, dict):
 
-        if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
 
-            raise ValueError("Body must be a JSON object")
-
-        normalized = _normalize_to_backend_json(raw)
-
-    except Exception as e:
-
-        log.exception("Normalization failed")
-
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
-
-    # Quick sanity: equal lengths for Q/A
-
-    if len(normalized.get("questions", [])) != len(normalized.get("answers", [])):
-
-        raise HTTPException(status_code=422, detail="questions/answers length mismatch")
+    normalized = _normalize_to_backend_json(raw)
 
     if preview:
 
-        return {"normalized_json": normalized, "note": "preview"}
+        return {"normalized_json": normalized}
 
     _require_backend()
 
-    # POST to backend /createRequestJSON
-
     try:
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=45) as client:
 
             resp = await client.post(
 
                 BACKEND_POST_URL,
 
-                json=normalized,  # Backend expects JSON (not XML)
+                json=normalized,
 
-                headers={"Content-Type": "application/json"}
+                headers={"Content-Type": "application/json"},
 
             )
 
     except httpx.RequestError as e:
 
-        log.error("Cannot reach backend: %s", e)
+        log.exception("Adapter could not reach backend: %s", e)
 
-        raise HTTPException(status_code=502, detail={"adapter_error": "cannot_reach_backend", "msg": str(e)})
+        raise HTTPException(status_code=502, detail=f"cannot_reach_backend: {e!s}")
 
-    # Build response
+    # If caller wants to see backend status/body, include them
 
     if echo:
+
+        body_text = resp.text
 
         return {
 
@@ -398,44 +532,41 @@ async def ingest(
 
             "backend_status": resp.status_code,
 
-            "backend_headers": dict(resp.headers),
+            "backend_headers": {
 
-            "backend_body": _safe_text(resp)
+                "content-type": resp.headers.get("content-type", ""),
+
+                "date": resp.headers.get("date", ""),
+
+                "server": resp.headers.get("server", ""),
+
+            },
+
+            "backend_body": body_text,
 
         }
 
-    # Default: pass through backend JSON/text
+    # Otherwise bubble success/errors appropriately
 
-    content_type = resp.headers.get("content-type", "")
+    if 200 <= resp.status_code < 300:
 
-    if "application/json" in content_type.lower():
+        # forward backend body as JSON if possible
 
         try:
 
-            return JSONResponse(status_code=resp.status_code, content=resp.json())
+            return resp.json()
 
         except Exception:
 
-            # backend said json but wasn't—return text
+            return JSONResponse(content={"body": resp.text}, media_type="application/json")
 
-            return JSONResponse(status_code=resp.status_code, content={"body": resp.text})
+    # Non-2xx -> explicit error
 
-    else:
+    raise HTTPException(
 
-        # Non-JSON backend body
+        status_code=502,
 
-        return JSONResponse(status_code=resp.status_code, content={"body": resp.text})
+        detail={"backend_status": resp.status_code, "body": resp.text},
 
-
-def _safe_text(resp: httpx.Response) -> str:
-
-    try:
-
-        return resp.text
-
-    except Exception:
-
-        # extremely rare, but guard anyway
-
-        return "<non-textual body>"
+    )
  
