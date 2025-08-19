@@ -41,12 +41,13 @@ except Exception as e:
     logging.warning("mapping.config.json invalid or missing, using default CFG: %s", e)
     CFG = DEFAULT_CFG
 
-# Pull values from CFG for global use
+# After loading CFG
 XML_ROOT = CFG.get("xml_root", "request")
+RESULT_KEY_CANDIDATES = [s.lower() for s in CFG.get("result_key_field_candidates", [])]
 FIELD_MAP = {k.lower(): v for k, v in CFG.get("field_map", {}).items()}
 ANS_KEY_TO_Q = CFG.get("answer_key_to_question", {})
-RESULT_KEY_CANDIDATES = [s.lower() for s in CFG.get("result_key_field_candidates", ["result_key", "response_id"])]
 DEFAULTS = CFG.get("defaults", {})
+
 
 
 # ---------- helpers ----------
