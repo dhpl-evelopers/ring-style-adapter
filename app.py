@@ -301,27 +301,23 @@ def health():
     return {"ok": True}
 
 @app.post("/ingest")
-
-async def ingest(req: Request, preview: bool = Query(False, description="Return normalized JSON without calling backend"),
-
-                 echo: bool = Query(False, description="Return backend status + body")):
-
-    _check_api_key(req)
-
-    _require_backend()
-
-    try:
-
-        raw = await req.json()
-
-        if not isinstance(raw, dict):
-
-            raise ValueError("Body must be a JSON object")
-
-    except Exception as e:
-
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
-
+async def ingest(
+   payload: dict = Body(..., example={
+       "request_id": "abc123",
+       "name": "Sakshi",
+       "email": "sakshi@example.com",
+       "answers": { "who": "Self", "gender": "Male" }
+   }),
+   preview: bool = Query(False, description="Return normalized JSON without calling backend"),
+   echo: bool = Query(False, description="Return backend status + body"),
+   req: Request = None
+):
+   _check_api_key(req)
+   _require_backend()
+   try:
+       raw = payload  # ✅ Already parsed dict
+   except Exception as e:
+       raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
     normalized = _normalize_to_backend_json(raw)
 
     # quick sanity checks
