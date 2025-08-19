@@ -24,88 +24,49 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 app = FastAPI(title="Ring Style Adapter (flex → JSON)", version="1.0.0")
 
-# ----------------- Env (set in Azure App Service) -----------------
+# ----------------- Environment -----------------
 
-# Example:
-
-#   BACKEND_POST_URL = https://<api>.azurewebsites.net/createRequestJSON
-
-#   BACKEND_GET_URL  = https://<api>.azurewebsites.net/fetchResponse?response_id=
+# e.g. https://<your-api>.azurewebsites.net/createRequestJSON
 
 BACKEND_POST_URL = os.getenv("BACKEND_POST_URL", "").strip()
-
-BACKEND_GET_URL = os.getenv("BACKEND_GET_URL", "").strip()
 
 API_KEY_REQUIRED = os.getenv("API_KEY_REQUIRED", "false").lower() == "true"
 
 API_KEY = os.getenv("API_KEY", "")
 
-# ----------------- Load mapping.config.json -----------------
+# ----------------- Config load (mapping.config.json) -----------------
 
 CFG_PATH = pathlib.Path(__file__).with_name("mapping.config.json")
 
 def _load_config() -> Dict[str, Any]:
 
-    """
-
-    Load mapping.config.json that defines:
-
-      - field_map: incoming name -> backend field name
-
-      - answer_key_to_question: map answer keys to canonical question text
-
-      - result_key_field_candidates: keys to look for request/response id
-
-      - defaults: default values for missing fields
-
-    """
-
     try:
 
-        with open(CFG_PATH, "r", encoding="utf-8") as f:
+        head = CFG_PATH.read_text(encoding="utf-8")[:200]
 
-            cfg = json.load(f)
+        print("DEBUG - Reading config from:", CFG_PATH)
 
-        return cfg
+        print("DEBUG - First 200 chars of config.json:", head)
+
+        with CFG_PATH.open("r", encoding="utf-8") as f:
+
+            return json.load(f)
 
     except Exception as e:
 
-        log.error("Could not read %s: %s", CFG_PATH, e)
+        print("ERROR - Could not read config:", e)
 
-        return {
-
-            "xml_root": "request",
-
-            "result_key_field_candidates": ["result_key", "response_id", "responseKey", "resultKey"],
-
-            "field_map": {},
-
-            "answer_key_to_question": {},
-
-            "defaults": {},
-
-        }
+        return {}
 
 CONFIG = _load_config()
 
-XML_ROOT = CONFIG.get("xml_root", "request")
-
-FIELD_MAP: Dict[str, str] = {k.lower(): v for k, v in CONFIG.get("field_map", {}).items()}
-
-ANS_KEY_TO_Q: Dict[str, str] = CONFIG.get("answer_key_to_question", {})
-
-RESULT_KEY_CANDIDATES: List[str] = [s.lower() for s in CONFIG.get("result_key_field_candidates", ["result_key", "response_id"])]
-
-DEFAULTS: Dict[str, Any] = CONFIG.get("defaults", {})
-
-
-# ----------------- Helpers -----------------
+# --------------- Helpers -----------------
 
 def _require_backend():
 
     if not BACKEND_POST_URL:
 
-        raise HTTPException(status_code=500, detail="BACKEND_POST_URL is not configured")
+        raise HTTPException(status_code=500, detail="BACKEND_POST_URL not configured")
 
 def _check_api_key(req: Request):
 
@@ -113,27 +74,43 @@ def _check_api_key(req: Request):
 
         return
 
-    if not API_KEY or req.headers.get("x-api-key") != API_KEY:
+    given = req.headers.get("x-api-key", "")
+
+    if (not API_KEY) or (given != API_KEY):
 
         raise HTTPException(status_code=401, detail="unauthorized")
 
-def _find_result_key(d: Dict[str, Any]) -> str:
+def _find_result_key(d: Dict[str, Any], candidates: List[str] = None) -> str:
 
-    """Find a request/result key anywhere in a nested object."""
+    if candidates is None:
 
-    for k in RESULT_KEY_CANDIDATES:
+        candidates = CONFIG.get(
 
-        for in_key, in_val in d.items():
+            "result_key_field_candidates",
 
-            if in_key.lower() == k:
+            ["result_key", "response_id", "responseKey", "resultKey"]
 
-                return str(in_val)
+        )
+
+    # direct
+
+    for k in list(d.keys()):
+
+        for c in candidates:
+
+            if k.lower() == c.lower():
+
+                v = d.get(k)
+
+                return "" if v is None else str(v)
+
+    # nested
 
     for v in d.values():
 
         if isinstance(v, dict):
 
-            rk = _find_result_key(v)
+            rk = _find_result_key(v, candidates)
 
             if rk:
 
@@ -141,160 +118,177 @@ def _find_result_key(d: Dict[str, Any]) -> str:
 
     return ""
 
-def _flatten(obj: Any) -> Dict[str, Any]:
+def _flatten(obj: Any, pref: str = "", out: Dict[str, Any] = None) -> Dict[str, Any]:
 
-    """Flatten nested dicts into { 'a.b.c': value } plus keep last-key map."""
+    """Flatten nested dicts to "a.b.c": value."""
 
-    flat: Dict[str, Any] = {}
-
-    def visit(prefix: str, node: Any):
-
-        if isinstance(node, dict):
-
-            for k, v in node.items():
-
-                visit(f"{prefix}.{k}" if prefix else k, v)
-
-        else:
-
-            flat[prefix] = node
+    out = out or {}
 
     if isinstance(obj, dict):
 
-        visit("", obj)
+        for k, v in obj.items():
 
-    return flat
+            _flatten(v, f"{pref}.{k}" if pref else k, out)
 
-def _normalize_answers(raw: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    else:
 
-    """
+        out[pref] = obj
 
-    Produce two parallel arrays: questions[], answers[] to match backend /createRequestJSON.
+    return out
 
-    Accepts:
-
-      1) raw["answers"] as a dict: {"who":"Self","gender":"Male"} -> map keys via ANS_KEY_TO_Q
-
-      2) raw["answers"] as a list of {"question": "...", "answer": "..."} objects
-
-      3) raw["answers"] as a list of strings (already ordered)
+def _choose_variant(cfg: dict, flat: Dict[str, Any]) -> Tuple[str, dict]:
 
     """
 
-    answers = raw.get("answers")
+    Decide which survey variant applies based on 'match' rules in config.
 
-    # Case 2: already structured list
+    """
 
-    if isinstance(answers, list) and answers and isinstance(answers[0], dict) and "question" in answers[0]:
+    surveys = cfg.get("surveys", {})
 
-        qs = [str(a.get("question", "")) for a in answers]
+    for name, sdef in surveys.items():
 
-        as_ = [str(a.get("answer", "")) for a in answers]
+        match = sdef.get("match", {})
 
-        return qs, as_
+        ok = True
 
-    # Case 3: list of strings (assume UI already ordered them)
+        for k, vals in match.items():
 
-    if isinstance(answers, list) and (not answers or isinstance(answers[0], (str, int, float))):
+            v = str(flat.get(k.lower(), "")).lower()
 
-        # Try to derive question text from ANS_KEY_TO_Q order if also provided as keys elsewhere
+            if not any(v == str(x).lower() for x in vals):
 
-        # Otherwise return empty questions with same length
+                ok = False
 
-        return [], [str(x) for x in answers]
+                break
 
-    # Case 1: dict of key->value, use map to question text
+        if ok:
 
-    if isinstance(answers, dict):
+            return name, sdef
 
-        qs, as_ = [], []
+    # fallback: first defined survey if any
 
-        for key, value in answers.items():
+    if surveys:
 
-            q_text = ANS_KEY_TO_Q.get(key, key)  # fallback to the key itself
+        name, sdef = next(iter(surveys.items()))
 
-            qs.append(str(q_text))
+        return name, sdef
 
-            as_.append("" if value is None else str(value))
-
-        return qs, as_
-
-    # Nothing provided
-
-    return [], []
+    return "", {}
 
 def _normalize_to_backend_json(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     """
 
-    Convert an arbitrary incoming JSON into what the backend expects for /createRequestJSON:
+    Convert free-form UI JSON into backend's expected JSON for /createRequestJSON.
 
-      {
-
-        "request_id": "...",
-
-        "email": "...",
-
-        "name": "...",
-
-        "phoneNumber": "...",
-
-        "birth_date": "...",
-
-        "questions": ["Q1...", "Q2..."],
-
-        "answers":   ["A1...", "A2..."]
-
-      }
+    Uses CONFIG.surveys to map and order questions/answers, padding missing values.
 
     """
 
-    out: Dict[str, Any] = dict(DEFAULTS)  # start with defaults
+    # Build lower-cased flat lookup for variant detection
 
-    # map top-level and nested fields using FIELD_MAP (case-insensitive)
+    flat_raw = {k.lower(): (str(v).lower() if isinstance(v, str) else v)
 
-    flat = _flatten(raw)
+                for k, v in _flatten(raw).items()}
 
-    for k, v in flat.items():
+    # Pick a survey variant
 
-        last = k.split(".")[-1].lower()
+    variant_name, survey = _choose_variant(CONFIG, flat_raw)
 
-        if last in FIELD_MAP:
+    log.info("Variant selected: %s", variant_name or "<none>")
 
-            out[FIELD_MAP[last]] = v
+    # Identity fields (with a few common fallbacks)
 
-    # request_id
+    request_id = _find_result_key(raw) or raw.get("request_id", "")
 
-    req_id = raw.get("request_id") or _find_result_key(raw)
+    name = (raw.get("name") or raw.get("full_name") or "").strip()
 
-    if req_id:
+    email = (raw.get("email") or "").strip()
 
-        out["request_id"] = str(req_id)
+    phone = (raw.get("phoneNumber") or raw.get("phone_number") or raw.get("phone") or "")
 
-    # questions & answers
+    birth_date = raw.get("birth_date") or raw.get("date") or ""
 
-    qs, as_ = _normalize_answers(raw)
+    # Questions mapping from variant
 
-    if qs:
+    questions: List[str] = list(survey.get("questions", []))
 
-        out["questions"] = qs
+    answer_keys: Dict[str, str] = survey.get("answer_keys", {})
 
-    if as_:
+    pad_val = survey.get("missing_answer_value", "null")
 
-        out["answers"] = as_
+    # Where answers might be present
 
-    # ensure expected keys exist (even if empty string)
+    answers_dict: Dict[str, Any] = raw.get("answers", {}) if isinstance(raw.get("answers"), dict) else {}
 
-    for k in ["request_id", "email", "name", "phoneNumber", "birth_date"]:
+    out_answers: List[str] = []
 
-        out.setdefault(k, "")
+    for q in questions:
 
-    out.setdefault("questions", [])
+        # find the UI key mapped to this question
 
-    out.setdefault("answers", [])
+        ui_key = None
 
-    return out
+        for k, qname in answer_keys.items():
 
+            if qname == q:
+
+                ui_key = k
+
+                break
+
+        val = None
+
+        if ui_key:
+
+            if ui_key in answers_dict:
+
+                val = answers_dict.get(ui_key)
+
+            elif ui_key in raw:
+
+                val = raw.get(ui_key)
+
+        if val is None or val == "":
+
+            val = pad_val
+
+        out_answers.append(str(val))
+
+    # Apply defaults if configured (won't overwrite already found values)
+
+    defaults = CONFIG.get("defaults", {})
+
+    request_id = request_id or defaults.get("request_id", "")
+
+    name       = name       or defaults.get("name", "")
+
+    email      = email      or defaults.get("email", "")
+
+    phone      = phone      or defaults.get("phoneNumber", "")
+
+    birth_date = birth_date or defaults.get("birth_date", "")
+
+    normalized = {
+
+        "request_id": request_id,
+
+        "email": email,
+
+        "name": name,
+
+        "phoneNumber": phone,
+
+        "birth_date": birth_date,
+
+        "questions": questions,
+
+        "answers": out_answers
+
+    }
+
+    return normalized
 
 # ----------------- Routes -----------------
 
@@ -306,11 +300,11 @@ def root():
 
         "ok": True,
 
-        "requires_api_key": API_KEY_REQUIRED,
-
-        "has_backend_urls": bool(BACKEND_POST_URL),
-
         "version": "1.0.0",
+
+        "has_backend_post_url": bool(BACKEND_POST_URL),
+
+        "api_key_required": API_KEY_REQUIRED
 
     }
 
@@ -324,35 +318,13 @@ def health():
 
 async def ingest(
 
-    raw: Dict[str, Any] = Body(
-
-        ...,
-
-        example={
-
-            "result_key": "abc123",
-
-            "name": "Sakshi",
-
-            "email": "sakshi@example.com",
-
-            "phone": "9999999999",
-
-            "birth_date": "2001-07-01",
-
-            "answers": {"who": "Self", "gender": "Male"},
-
-        },
-
-        description="Flexible UI payload",
-
-    ),
+    raw: dict = Body(..., description="Flexible UI JSON"),
 
     preview: bool = Query(False, description="Return normalized JSON without calling backend"),
 
     echo: bool = Query(False, description="Return backend status + body"),
 
-    req: Request = None,
+    req: Request = None
 
 ):
 
@@ -360,79 +332,110 @@ async def ingest(
 
     Accept flexible UI JSON, normalize to backend expected JSON.
 
-    If `preview=true`, return normalized JSON only.
+    If preview=true -> return normalized only.
 
-    Otherwise post to BACKEND_POST_URL (/createRequestJSON) and return status.
+    Otherwise POST to BACKEND_POST_URL (/createRequestJSON) and return backend result.
 
     """
 
     _check_api_key(req)
 
-    # Normalize now (this also works as schema/sanity validation)
+    try:
 
-    if not isinstance(raw, dict):
+        if not isinstance(raw, dict):
 
-        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+            raise ValueError("Body must be a JSON object")
 
-    normalized = _normalize_to_backend_json(raw)
+        normalized = _normalize_to_backend_json(raw)
+
+    except Exception as e:
+
+        log.exception("Normalization failed")
+
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+
+    # Quick sanity: equal lengths for Q/A
+
+    if len(normalized.get("questions", [])) != len(normalized.get("answers", [])):
+
+        raise HTTPException(status_code=422, detail="questions/answers length mismatch")
 
     if preview:
 
-        return JSONResponse(status_code=200, content={"normalized": normalized, "note": "preview=true (no backend call)"})
+        return {"normalized_json": normalized, "note": "preview"}
 
     _require_backend()
 
-    # Call backend
+    # POST to backend /createRequestJSON
 
     try:
 
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
 
-            resp = await client.post(BACKEND_POST_URL, json=normalized)
+            resp = await client.post(
+
+                BACKEND_POST_URL,
+
+                json=normalized,  # Backend expects JSON (not XML)
+
+                headers={"Content-Type": "application/json"}
+
+            )
 
     except httpx.RequestError as e:
 
         log.error("Cannot reach backend: %s", e)
 
-        raise HTTPException(status_code=502, detail=f"cannot_reach_backend: {e}")
+        raise HTTPException(status_code=502, detail={"adapter_error": "cannot_reach_backend", "msg": str(e)})
 
     # Build response
 
-    ct = resp.headers.get("content-type", "")
+    if echo:
 
-    body_text = resp.text
+        return {
 
-    body_json = None
+            "sent_json": normalized,
 
-    if "json" in ct.lower():
+            "backend_status": resp.status_code,
+
+            "backend_headers": dict(resp.headers),
+
+            "backend_body": _safe_text(resp)
+
+        }
+
+    # Default: pass through backend JSON/text
+
+    content_type = resp.headers.get("content-type", "")
+
+    if "application/json" in content_type.lower():
 
         try:
 
-            body_json = resp.json()
+            return JSONResponse(status_code=resp.status_code, content=resp.json())
 
         except Exception:
 
-            body_json = None
+            # backend said json but wasn't—return text
 
-    payload: Dict[str, Any] = {
-
-        "backend_status": resp.status_code,
-
-        "backend_body": body_json if body_json is not None else body_text,
-
-    }
-
-    if echo:
-
-        payload["sent"] = normalized
-
-    # Use 200 for success; bubble backend code otherwise (as 502)
-
-    if 200 <= resp.status_code < 300:
-
-        return JSONResponse(status_code=200, content=payload)
+            return JSONResponse(status_code=resp.status_code, content={"body": resp.text})
 
     else:
 
-        return JSONResponse(status_code=502, content=payload)
+        # Non-JSON backend body
+
+        return JSONResponse(status_code=resp.status_code, content={"body": resp.text})
+
+
+def _safe_text(resp: httpx.Response) -> str:
+
+    try:
+
+        return resp.text
+
+    except Exception:
+
+        # extremely rare, but guard anyway
+
+        return "<non-textual body>"
  
