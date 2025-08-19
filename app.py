@@ -115,25 +115,68 @@ def root():
 @app.get("/health")
 def health():
    return {"ok": True}
+from fastapi import Body, Query, Request
+
 @app.post("/ingest")
+
 async def ingest(
-   req: Request,
-   preview: bool = Query(False, description="Return normalized JSON without calling backend"),
-   echo: bool = Query(False, description="Return backend status + body"),
+
+    raw: dict = Body(
+
+        ...,
+
+        example={
+
+            "result_key": "abc123",
+
+            "full_name": "Sakshi",
+
+            "email": "sakshi@example.com",
+
+            "answers": {"who": "Self", "gender": "Male"}
+
+        },
+
+        description="Flexible UI JSON payload"
+
+    ),
+
+    preview: bool = Query(False, description="Return normalized JSON without calling backend"),
+
+    echo: bool = Query(False, description="Return backend status + body"),
+
+    req: Request = None,  # optional – keep if you still want access to headers (e.g., x-api-key)
+
 ):
-   _check_api_key(req)
-   raw = await req.json()
-   if not isinstance(raw, dict):
-       raise HTTPException(status_code=400, detail="Body must be a JSON object")
-   normalized = _normalize_fields(raw)
-   # sanity: typical keys your backend wants
-   missing = [k for k in ["request_id", "name", "email"] if not normalized.get(k)]
-   if missing:
-       # not fatal; warn so you can see it in logs
-       log.warning("Normalized JSON missing fields: %s", missing)
-   if preview:
-       # Just show the JSON we would send to /createRequestJSON
-       return JSONResponse({"normalized": normalized})
+
+    _check_api_key(req)
+
+    _require_backend()
+
+    # you no longer need: raw = await req.json()
+
+    # 'raw' already contains the JSON body as a dict.
+
+    # ... continue with your existing logic:
+
+    normalized = _normalize_to_backend_json(raw)
+
+    # sanity check & preview/echo handling exactly as before
+
+    missing = [k for k in ["request_id", "name", "email"] if not normalized.get(k)]
+
+    if missing:
+
+        log.warning("Normalized JSON missing fields: %s", missing)
+
+    if preview:
+
+        return JSONResponse({"normalized": normalized})
+
+    # call backend if not preview...
+
+    # (your existing httpx call stays the same, just use `json=normalized`)
+ 
    _require_backend()
    # Send JSON to /createRequestJSON (your backend’s JSON endpoint)
    try:
