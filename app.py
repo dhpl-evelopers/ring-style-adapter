@@ -1,4 +1,5 @@
 import os, json, logging
+import pathlib
 
 from typing import Any, Dict, List, Tuple
 
@@ -306,15 +307,6 @@ async def ingest(req: Request, preview: bool = Query(False, description="Return 
    _check_api_key(req)
    _require_backend()
    try:
-       # DEBUG: check if mapping.config.json is deployed & readable
-       CFG_PATH = pathlib.Path(__file__).with_name("mapping.config.json")
-       print("DEBUG - Reading config from:", CFG_PATH)
-       with open(CFG_PATH, "r", encoding="utf-8") as f:
-           head = f.read(200)   # just preview first 200 chars
-           print("DEBUG - First 200 chars of config.json:", head)
-           f.seek(0)
-           config = json.load(f)
-       # Now continue with your existing request handling
        raw = await req.json()
        if not isinstance(raw, dict):
            raise ValueError("Body must be a JSON object")
