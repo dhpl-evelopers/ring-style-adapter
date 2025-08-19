@@ -1,25 +1,76 @@
 {
-  "xml_root": "request",
-  "result_key_field_candidates": ["result_key", "response_id", "responseKey", "resultKey"],
-  "field_map": {
-    "full_name": "name",
-    "name": "name",
-    "email": "email",
-    "phone": "phoneNumber",
-    "phone_number": "phoneNumber",
-    "birth_date": "birth_date",
-    "date": "birth_date"
-  },
-  "answer_key_to_question": {
-    "who": "Q1. Who are you…?",
-    "gender": "Q2. Gender",
-    "occasion": "Q3. Occasion",
-    "purpose": "Q4. Purpose"
-  },
-  "defaults": {
-    "name": "",
-    "email": "",
-    "phoneNumber": "",
-    "birth_date": ""
-  }
+ "result_key_field_candidates": ["result_key", "response_id", "responseKey", "resultKey"],
+ "defaults": {
+   "request_id": "",
+   "name": "",
+   "email": "",
+   "phoneNumber": "",
+   "birth_date": ""
+ },
+ "surveys": {
+   "self_female": {
+     "match": { "purchase_for": ["self"], "gender": ["female"] },
+     "questions": [
+       "Q1. Who are you?",
+       "Q2. Gender",
+       "Q3. Occasion",
+       "Q4. Purpose"
+     ],
+     "answer_keys": {
+       "who": "Q1. Who are you?",
+       "gender": "Q2. Gender",
+       "occasion": "Q3. Occasion",
+       "purpose": "Q4. Purpose"
+     },
+     "missing_answer_value": "null"
+   },
+   "self_male": {
+     "match": { "purchase_for": ["self"], "gender": ["male"] },
+     "questions": [
+       "Q1. Who are you?",
+       "Q2. Gender",
+       "Q3. Occasion",
+       "Q4. Purpose"
+     ],
+     "answer_keys": {
+       "who": "Q1. Who are you?",
+       "gender": "Q2. Gender",
+       "occasion": "Q3. Occasion",
+       "purpose": "Q4. Purpose"
+     },
+     "missing_answer_value": "null"
+   },
+   "other_female": {
+     "match": { "purchase_for": ["other"], "gender": ["female", "girl", "she"] },
+     "questions": [
+       "Q1. Who are you?",
+       "Q2. Gender",
+       "Q3. Occasion",
+       "Q4. Purpose"
+     ],
+     "answer_keys": {
+       "who": "Q1. Who are you?",
+       "gender": "Q2. Gender",
+       "occasion": "Q3. Occasion",
+       "purpose": "Q4. Purpose"
+     },
+     "missing_answer_value": "null"
+   },
+   "other_male": {
+     "match": { "purchase_for": ["other"], "gender": ["male", "boy", "he"] },
+     "questions": [
+       "Q1. Who are you?",
+       "Q2. Gender",
+       "Q3. Occasion",
+       "Q4. Purpose"
+     ],
+     "answer_keys": {
+       "who": "Q1. Who are you?",
+       "gender": "Q2. Gender",
+       "occasion": "Q3. Occasion",
+       "purpose": "Q4. Purpose"
+     },
+     "missing_answer_value": "null"
+   }
+ }
 }
