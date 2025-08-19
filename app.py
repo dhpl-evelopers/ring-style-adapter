@@ -1,246 +1,140 @@
-import os, json, logging
-from typing import Any, Dict, List, Tuple
+import os
+import json
+import logging
+from typing import Any, Dict, Optional
 import httpx
-from fastapi import FastAPI, Request, HTTPException, Body, Query
-from fastapi.responses import JSONResponse, PlainTextResponse
-from dicttoxml import dicttoxml
-# ---------- Logging ----------
+from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
+# ---------------- Logging ----------------
 log = logging.getLogger("adapter")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-# ---------- FastAPI ----------
-app = FastAPI(title="Ring Style Adapter", version="1.0.0")
-# ---------- Env (set these in Azure App Service > Configuration) ----------
-BACKEND_POST_URL = os.getenv("BACKEND_POST_URL", "").strip()   # e.g. https://<api>/createRequest
-BACKEND_GET_URL  = os.getenv("BACKEND_GET_URL", "").strip()    # e.g. https://<api>/fetchResponse?response_id=
+# ---------------- App ----------------
+app = FastAPI(title="Ring Style Adapter (JSON passthrough)", version="1.0.0")
+# ---------------- Env ----------------
+# Set these in Azure > Your Web App > Settings > Environment variables
+BACKEND_POST_URL = os.getenv("BACKEND_POST_URL", "").strip()  # e.g. https://<api>.azurewebsites.net/createRequest
+BACKEND_GET_URL  = os.getenv("BACKEND_GET_URL", "").strip()   # e.g. https://<api>.azurewebsites.net/fetchResponse?response_id=
 API_KEY_REQUIRED = os.getenv("API_KEY_REQUIRED", "false").lower() == "true"
 API_KEY          = os.getenv("API_KEY", "")
-# ---------- Mapping config ----------
-# ---------- Mapping config ----------
-CFG_PATH = os.path.join(os.path.dirname(__file__), "mapping.config.json")
-
-DEFAULT_CFG = {
-    "xml_root": "request",
-    "result_key_field_candidates": ["result_key", "response_id", "responseKey", "resultKey"],
-    "field_map": {
-        "full_name": "name",
-        "name": "name",
-        "email": "email",
-        "phone": "phoneNumber",
-        "phone_number": "phoneNumber",
-        "birth_date": "birth_date",
-        "date": "birth_date"
-    },
-    "answer_key_to_question": {},
-    "defaults": {"name": "", "email": "", "phoneNumber": "", "birth_date": ""}
-}
-
-try:
-    with open(CFG_PATH, "r", encoding="utf-8") as f:
-        CFG = json.load(f)
-except Exception as e:
-    logging.warning("mapping.config.json invalid or missing, using default CFG: %s", e)
-    CFG = DEFAULT_CFG
-
-# After loading CFG
-XML_ROOT = CFG.get("xml_root", "request")
-RESULT_KEY_CANDIDATES = [s.lower() for s in CFG.get("result_key_field_candidates", [])]
-FIELD_MAP = {k.lower(): v for k, v in CFG.get("field_map", {}).items()}
-ANS_KEY_TO_Q = CFG.get("answer_key_to_question", {})
-DEFAULTS = CFG.get("defaults", {})
-
-
-
-# ---------- helpers ----------
-def _require_backend_urls():
+# ---------------- Helpers ----------------
+def _need_backend_urls():
    if not BACKEND_POST_URL or not BACKEND_GET_URL:
        raise HTTPException(status_code=500, detail="BACKEND_POST_URL / BACKEND_GET_URL are not configured")
 def _check_api_key(req: Request):
    if not API_KEY_REQUIRED:
        return
-   if not API_KEY or req.headers.get("x-api-key") != API_KEY:
+   user_key = req.headers.get("x-api-key")
+   if not API_KEY or not user_key or user_key != API_KEY:
        raise HTTPException(status_code=401, detail="unauthorized")
-def _find_result_key(d: Dict[str, Any]) -> str:
-   # Search common places for a result/response key
-   for k in RESULT_KEY_CANDIDATES:
-       for key in d.keys():
-           if key.lower() == k:
-               return str(d[key])
-   # sometimes nested
-   for v in d.values():
-       if isinstance(v, dict):
-           rk = _find_result_key(v)
-           if rk:
-               return rk
-   return ""
-def _gather_fields(d: Dict[str, Any]) -> Dict[str, Any]:
+def _build_fetch_url(response_id: str) -> str:
    """
-   Take any free-form JSON and map/normalize to backend flat fields using FIELD_MAP + DEFAULTS.
+   Build a GET URL for fetchResponse from the env template.
+   Supports any of:
+     - '.../fetchResponse?response_id='  (we'll append the id)
+     - '.../fetchResponse?foo=bar'       (we'll add &response_id=<id>)
+     - '.../fetchResponse/{id}'          (use {id} placeholder)
    """
-   out = dict(DEFAULTS)  # start with defaults
-   # collect all flat candidates (flatten arbitrarily)
-   flat: Dict[str, Any] = {}
-   def visit(prefix: str, node: Any):
-       if isinstance(node, dict):
-           for k, v in node.items():
-               visit(f"{prefix}.{k}" if prefix else k, v)
-       elif isinstance(node, list):
-           # store lists as JSON strings for fields (answers handled elsewhere)
-           flat[prefix] = json.dumps(node, ensure_ascii=False)
-       else:
-           flat[prefix] = node
-   visit("", d)
-   # map by FIELD_MAP (case-insensitive on incoming keys; use last segment)
-   for inkoming_key, value in flat.items():
-       lk = inkoming_key.split(".")[-1].lower()
-       if lk in FIELD_MAP:
-           out[FIELD_MAP[lk]] = value
-       else:
-           # if same tag name already suitable (rare), keep as-is
-           if lk in DEFAULTS:
-               out[lk] = value
-   return out
-def _normalize_answers(d: Dict[str, Any]) -> List[Dict[str, str]]:
-   """
-   Produce backend 'answers' list in shape: [{ "question": "...", "answer": "..." }, ...]
-   Accepts:
-     - already-structured answers array
-     - key/value dict where keys are mapped via ANS_KEY_TO_Q
-     - top-level keys matching ANS_KEY_TO_Q
-   """
-   # Case 1: already an array of objects
-   if isinstance(d.get("answers"), list) and d["answers"] and isinstance(d["answers"][0], dict):
-       norm = []
-       for it in d["answers"]:
-           q = it.get("question") or it.get("q") or it.get("label")
-           a = it.get("answer") or it.get("a") or it.get("value")
-           if q is not None and a is not None:
-               norm.append({"question": str(q), "answer": str(a)})
-       if norm:
-           return norm
-   # Case 2: a dict of answers like {"who":"Self","gender":"Male"}
-   guess: Dict[str, Any] = {}
-   if isinstance(d.get("answers"), dict):
-       guess = d["answers"]
-   else:
-       # look for top-level keys that match ANS_KEY_TO_Q
-       for key in ANS_KEY_TO_Q.keys():
-           if key in d:
-               guess[key] = d[key]
-   arr: List[Dict[str, str]] = []
-   for k, v in guess.items():
-       q = ANS_KEY_TO_Q.get(k, k)
-       if isinstance(v, (dict, list)):
-           v = json.dumps(v, ensure_ascii=False)
-       arr.append({"question": str(q), "answer": str(v)})
-   return arr
-def build_backend_payload(ui_json: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
-   """
-   Build the dict that the backend expects (before XML conversion).
-   The XML will look like:
-<request>
-<name>...</name>
-<email>...</email>
-<phoneNumber>...</phoneNumber>
-<birth_date>...</birth_date>
-<result_key>...</result_key>
-<answers>
-<item>
-<question>...</question>
-<answer>...</answer>
-</item>
-         ...
-</answers>
-</request>
-   """
-   fields = _gather_fields(ui_json)
-   answers = _normalize_answers(ui_json)
-   result_key = _find_result_key(ui_json)
-   backend_dict: Dict[str, Any] = {**fields}
-   if result_key:
-       backend_dict["result_key"] = result_key
-   if answers:
-       backend_dict["answers"] = answers
-   # fallbacks to ensure keys exist even if empty
-   for k in ["name", "email", "phoneNumber", "birth_date"]:
-       backend_dict.setdefault(k, DEFAULTS.get(k, ""))
-   return backend_dict, result_key
-# ---------- routes ----------
+   if "{id}" in BACKEND_GET_URL:
+       return BACKEND_GET_URL.replace("{id}", response_id)
+   if BACKEND_GET_URL.endswith("="):
+       return BACKEND_GET_URL + response_id
+   joiner = "&" if ("?" in BACKEND_GET_URL) else "?"
+   return f"{BACKEND_GET_URL}{joiner}response_id={response_id}"
+async def _call_backend_post(payload: Dict[str, Any]) -> httpx.Response:
+   headers = {"Content-Type": "application/json"}
+   async with httpx.AsyncClient(timeout=30) as client:
+       return await client.post(BACKEND_POST_URL, json=payload, headers=headers)
+async def _call_backend_get(url: str) -> httpx.Response:
+   async with httpx.AsyncClient(timeout=30) as client:
+       return await client.get(url)
+# ---------------- Routes ----------------
 @app.get("/")
 def root():
    return {
        "ok": True,
+       "version": "1.0.0",
        "requires_api_key": API_KEY_REQUIRED,
-       "post_url_set": bool(BACKEND_POST_URL),
-       "get_url_set": bool(BACKEND_GET_URL),
-       "xml_root": XML_ROOT
+       "has_backend_urls": bool(BACKEND_POST_URL and BACKEND_GET_URL),
+       "post_url_configured": bool(BACKEND_POST_URL),
+       "get_url_configured": bool(BACKEND_GET_URL),
    }
 @app.get("/health")
 def health():
    return {"ok": True}
 @app.post("/ingest")
 async def ingest(
-   payload: Dict[str, Any] = Body(..., description="Flexible UI JSON"),
-   request: Request = None,
-   preview: bool = Query(False, description="If true, return generated XML without calling backend"),
-   echo: bool = Query(False, description="If true, return sent XML + backend status/body")
+   req: Request,
+   preview: bool = Query(False, description="If true, just echo JSON without calling backend"),
+   echo: bool = Query(False, description="If true, include the sent JSON and backend status/body")
 ):
-   _require_backend_urls()
-   _check_api_key(request)
-   backend_dict, _ = build_backend_payload(payload)
-   # Convert dict -> XML
-   xml_bytes = dicttoxml(backend_dict, custom_root=XML_ROOT, attr_type=False)
-   xml_text = xml_bytes.decode("utf-8", errors="ignore")
-   if preview:
-       # Show exactly what will be sent
-       return PlainTextResponse(xml_text, media_type="application/xml")
-   # Send to backend
+   """
+   Accept arbitrary JSON and forward it **as JSON** to your backend /createRequest.
+   - preview=true  -> return the JSON you posted (no backend call)
+   - echo=true     -> include the JSON + backend status/body in the response (for debugging)
+   """
+   _need_backend_urls()
+   _check_api_key(req)
+   # Parse JSON body (never assume schema)
    try:
-       async with httpx.AsyncClient(timeout=30) as client:
-           resp = await client.post(
-               BACKEND_POST_URL,
-               content=xml_bytes,
-               headers={
-                   "Content-Type": "application/xml; charset=utf-8",
-                   "Accept": "application/xml,application/json,text/plain,*/*"
+       payload = await req.json()
+       if not isinstance(payload, dict):
+           # wrap primitives/arrays so backend always receives an object
+           payload = {"data": payload}
+   except Exception as e:
+       raise HTTPException(status_code=400, detail=f"Invalid JSON body: {e}")
+   if preview:
+       # Just confirm what we would send
+       return JSONResponse({"preview": True, "json": payload})
+   # Call backend /createRequest (JSON -> JSON)
+   try:
+       resp = await _call_backend_post(payload)
+   except httpx.RequestError as e:
+       # Network/DNS/timeout/etc between adapter and backend
+       return JSONResponse(
+           status_code=502,
+           content={"detail": {"adapter_error": "cannot_reach_backend", "msg": str(e)}},
+       )
+   # Pass through backend success
+   if 200 <= resp.status_code < 300:
+       ctype = resp.headers.get("content-type", "")
+       if echo:
+           return JSONResponse(
+               {
+                   "json": payload,
+                   "backend_status": resp.status_code,
+                   "backend_body": resp.json() if "json" in ctype else resp.text,
                }
            )
-   except httpx.RequestError as e:
-       log.exception("Backend unreachable")
-       raise HTTPException(status_code=502, detail={"adapter_error": "cannot_reach_backend", "msg": str(e)})
-   ct = (resp.headers.get("content-type") or "").lower()
-   body_text = resp.text
-   if echo:
-       return JSONResponse({
-           "sent_xml": xml_text,
-           "backend_status": resp.status_code,
-           "backend_content_type": ct,
-           "backend_body": body_text
-       }, status_code=resp.status_code if 200 <= resp.status_code < 300 else 502)
-   if 200 <= resp.status_code < 300:
-       # pass through success
-       return PlainTextResponse(
-           body_text,
-           media_type="application/xml" if "xml" in ct else "application/json"
-       )
-   # bubble backend failure with its body (don’t hide as generic 500)
+       # Stream JSON or plain text back transparently
+       if "json" in ctype:
+           return JSONResponse(resp.json())
+       return Response(content=resp.text, media_type=ctype or "text/plain")
+   # Bubble backend failures as 502 with backend status+body (so you can see it's the backend)
    return JSONResponse(
        status_code=502,
-       content={"detail": {"backend_status": resp.status_code, "body": body_text}}
+       content={"detail": {"backend_status": resp.status_code, "body": resp.text}},
    )
 @app.get("/result")
-async def result(response_id: str, request: Request = None):
-   _require_backend_urls()
-   _check_api_key(request)
-   url = BACKEND_GET_URL
-   # allow both templated and query forms
-   if "{response_id}" in url:
-       url = url.replace("{response_id}", response_id)
-   elif "response_id=" not in url:
-       join = "&" if "?" in url else "?"
-       url = f"{url}{join}response_id={response_id}"
+async def result(response_id: str = Query(..., description="Response / result key to fetch")):
+   """
+   Fetch a result from backend /fetchResponse using ?response_id=<id>
+   or a {id} placeholder provided via BACKEND_GET_URL.
+   """
+   _need_backend_urls()
+   url = _build_fetch_url(response_id)
    try:
-       async with httpx.AsyncClient(timeout=30) as client:
-           r = await client.get(url, headers={"Accept": "application/xml,application/json,text/plain,*/*"})
+       resp = await _call_backend_get(url)
    except httpx.RequestError as e:
-       raise HTTPException(status_code=502, detail={"adapter_error": "cannot_reach_backend", "msg": str(e)})
-   return PlainTextResponse(r.text, media_type=(r.headers.get("content-type") or "text/plain"))
+       return JSONResponse(
+           status_code=502,
+           content={"detail": {"adapter_error": "cannot_reach_backend", "msg": str(e)}},
+       )
+   if 200 <= resp.status_code < 300:
+       ctype = resp.headers.get("content-type", "")
+       if "json" in ctype:
+           return JSONResponse(resp.json())
+       return Response(content=resp.text, media_type=ctype or "text/plain")
+   return JSONResponse(
+       status_code=502,
+       content={"detail": {"backend_status": resp.status_code, "body": resp.text}},
+   )
