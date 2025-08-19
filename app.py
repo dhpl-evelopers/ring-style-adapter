@@ -41,6 +41,14 @@ except Exception as e:
     logging.warning("mapping.config.json invalid or missing, using default CFG: %s", e)
     CFG = DEFAULT_CFG
 
+# Pull values from CFG for global use
+XML_ROOT = CFG.get("xml_root", "request")
+FIELD_MAP = {k.lower(): v for k, v in CFG.get("field_map", {}).items()}
+ANS_KEY_TO_Q = CFG.get("answer_key_to_question", {})
+RESULT_KEY_CANDIDATES = [s.lower() for s in CFG.get("result_key_field_candidates", ["result_key", "response_id"])]
+DEFAULTS = CFG.get("defaults", {})
+
+
 # ---------- helpers ----------
 def _require_backend_urls():
    if not BACKEND_POST_URL or not BACKEND_GET_URL:
