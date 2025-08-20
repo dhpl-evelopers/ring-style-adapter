@@ -1,76 +1,77 @@
 {
- "result_key_field_candidates": ["result_key", "response_id", "responseKey", "resultKey"],
- "defaults": {
-   "request_id": "",
-   "name": "",
-   "email": "",
-   "phoneNumber": "",
-   "birth_date": ""
- },
- "surveys": {
-   "self_female": {
-     "match": { "purchase_for": ["self"], "gender": ["female"] },
-     "questions": [
-       "Q1. Who are you?",
-       "Q2. Gender",
-       "Q3. Occasion",
-       "Q4. Purpose"
-     ],
-     "answer_keys": {
-       "who": "Q1. Who are you?",
-       "gender": "Q2. Gender",
-       "occasion": "Q3. Occasion",
-       "purpose": "Q4. Purpose"
-     },
-     "missing_answer_value": "null"
-   },
-   "self_male": {
-     "match": { "purchase_for": ["self"], "gender": ["male"] },
-     "questions": [
-       "Q1. Who are you?",
-       "Q2. Gender",
-       "Q3. Occasion",
-       "Q4. Purpose"
-     ],
-     "answer_keys": {
-       "who": "Q1. Who are you?",
-       "gender": "Q2. Gender",
-       "occasion": "Q3. Occasion",
-       "purpose": "Q4. Purpose"
-     },
-     "missing_answer_value": "null"
-   },
-   "other_female": {
-     "match": { "purchase_for": ["other"], "gender": ["female", "girl", "she"] },
-     "questions": [
-       "Q1. Who are you?",
-       "Q2. Gender",
-       "Q3. Occasion",
-       "Q4. Purpose"
-     ],
-     "answer_keys": {
-       "who": "Q1. Who are you?",
-       "gender": "Q2. Gender",
-       "occasion": "Q3. Occasion",
-       "purpose": "Q4. Purpose"
-     },
-     "missing_answer_value": "null"
-   },
-   "other_male": {
-     "match": { "purchase_for": ["other"], "gender": ["male", "boy", "he"] },
-     "questions": [
-       "Q1. Who are you?",
-       "Q2. Gender",
-       "Q3. Occasion",
-       "Q4. Purpose"
-     ],
-     "answer_keys": {
-       "who": "Q1. Who are you?",
-       "gender": "Q2. Gender",
-       "occasion": "Q3. Occasion",
-       "purpose": "Q4. Purpose"
-     },
-     "missing_answer_value": "null"
-   }
- }
+    "field_map": {
+        "name": "full_name",
+        "email": "email",
+        "phone": "phone_number",
+        "birth_date": "birthdate",
+        "request_id": "result_key"
+    },
+    "result_key_field_candidates": [
+        "request_id",
+        "result_key"
+    ],
+    "defaults": {
+        "full_name": "",
+        "email": "",
+        "phone_number": "",
+        "birthdate": ""
+    },
+    "answer_key_to_question": {
+        "purchase_for": "Who are you purchasing for?",
+        "gender": "Gender"
+    },
+    "answer_key_to_question_variants": {
+        "self": {
+            "profession": "Which Category Does Your Profession Fall In?",
+            "occasion": "Occasion",
+            "purpose": "Purpose",
+            "day": "How would you describe your typical day?",
+            "weekend": "How Do You Prefer To Spend Your Weekends?",
+            "work_dress": "How Do You Typically Dress For Work?",
+            "social_dress": "How Do You Typically Dress For Social Events?",
+            "line": "You Are Waiting In A Long Line",
+            "painting": "Whenever You See A Painting",
+            "word": "Choose A Word That Describes You Better",
+            "plan": "I Usually Like To"
+        },
+        "others_female": {
+            "profession": "Which Category Does Her Profession Fall In?",
+            "occasion": "Occasion",
+            "purpose": "Purpose",
+            "day": "How would you describe her typical day?",
+            "weekend": "How Does She Prefer To Spend Her Weekends?",
+            "work_dress": "How Does She Typically Dress For Work?",
+            "social_dress": "How Does She Typically Dress For Social Events?",
+            "line": "She Is Waiting In A Long Line",
+            "painting": "Whenever She Sees A Painting",
+            "word": "Choose A Word That Describes Her Better",
+            "plan": "She Usually Likes To"
+        },
+        "others_male": {
+            "profession": "Which Category Does His Profession Fall In?",
+            "occasion": "Occasion",
+            "purpose": "Purpose",
+            "day": "How would you describe his typical day?",
+            "weekend": "How Does He Prefer To Spend His Weekends?",
+            "work_dress": "How Does He Typically Dress For Work?",
+            "social_dress": "How Does He Typically Dress For Social Events?",
+            "line": "He Is Waiting In A Long Line",
+            "painting": "Whenever He Sees A Painting",
+            "word": "Choose A Word That Describes Him Better",
+            "plan": "He Usually Likes To"
+        },
+        "others": {
+            "profession": "Which Category Does Their Profession Fall In?",
+            "occasion": "Occasion",
+            "purpose": "Purpose",
+            "day": "How would you describe their typical day?",
+            "weekend": "How Do They Prefer To Spend Their Weekends?",
+            "work_dress": "How Do They Typically Dress For Work?",
+            "social_dress": "How Do They Typically Dress For Social Events?",
+            "line": "They Are Waiting In A Long Line",
+            "painting": "Whenever They See A Painting",
+            "word": "Choose A Word That Describes Them Better",
+            "plan": "They Usually Like To"
+        }
+    }
 }
