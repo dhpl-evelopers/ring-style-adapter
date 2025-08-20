@@ -140,69 +140,80 @@ def _flatten_answers(raw: Dict[str, Any]) -> List[str]:
 
     return flat
 
-def _normalize_to_backend_json(raw: Dict[str, Any]) -> Dict[str, Any]:
-
-    """
-
-    Map flexible UI JSON to the backend's expected JSON keys.
-
-    Uses FIELD_MAP + DEFAULTS and preserves unknown fields under 'context'.
-
-    """
-
-    out: Dict[str, Any] = dict(DEFAULTS)
-
-    # apply field_map (case-insensitive on input keys)
-
-    for k, v in raw.items():
-
-        lk = k.lower()
-
-        if lk in FIELD_MAP:
-
-            out[FIELD_MAP[lk]] = v
-
-    # always ensure a request_id (backend expects this key name)
-
-    # Try common candidates: result_key / response_id / request_id
-
-    for cand in ("request_id", "result_key", "response_id", "responseKey", "resultKey"):
-
-        if cand in raw and str(raw[cand]).strip():
-
-            out["request_id"] = str(raw[cand]).strip()
-
-            break
-
-    out.setdefault("request_id", "")
-
-    # required identity-ish fields (mapped or pass-through)
-
-    for k in ["name", "email", "phoneNumber", "birth_date"]:
-
-        if k not in out and k in raw:
-
-            out[k] = raw[k]
-
-    # answers (flatten to list of strings)
-
-    out["answers"] = _flatten_answers(raw)
-
-    # keep the original raw for traceability (optional)
-
-    out["context"] = {
-
-        "purchase_for": raw.get("purchase_for") or raw.get("purchaseFor"),
-
-        "gender": raw.get("gender"),
-
-        "occasion": raw.get("occasion"),
-
-        "purpose": raw.get("purpose"),
-
-    }
-
-    return out
+# ---- Normalizer that ALWAYS produces backend JSON shape ----
+REQUIRED_KEYS = ["request_id", "email", "name", "phoneNumber", "birth_date"]
+def _normalize_to_backend_json(raw: dict) -> dict:
+   # 1) request_id
+   request_id = (
+       raw.get("request_id")
+       or raw.get("result_key")
+       or raw.get("response_id")
+       or raw.get("resultKey")
+       or raw.get("reskey")
+       or ""
+   )
+   # 2) identity fields (allow multiple spellings)
+   def pick(*keys, default=""):
+       for k in keys:
+           if isinstance(raw.get(k), str) and raw.get(k).strip():
+               return raw[k].strip()
+       return default
+   name        = pick("name", "full_name", "customer_name")
+   email       = pick("email", "mail")
+   phoneNumber = pick("phoneNumber", "phone_number", "phone", "mobile")
+   birth_date  = pick("birth_date", "birthDate", "dob", "date")
+   # 3) build answers dict from flexible UI
+   #    - First prefer a flat array "answers": [...]
+   #    - Otherwise look for individual fields in FIELD_MAP
+   answers_list: list[str] = []
+   if isinstance(raw.get("answers"), list) and raw["answers"]:
+       # Already an array from UI → coerce to string list
+       answers_list = ["" if a is None else str(a) for a in raw["answers"]]
+   else:
+       # Build from named fields in a stable order (who, gender, occasion, purpose)
+       who      = pick("who", "purchase_for", "forWhom")
+       gender   = pick("gender")
+       occasion = pick("occasion")
+       purpose  = pick("purpose")
+       answers_list = [who, gender, occasion, purpose]
+   # 4) questions array (same order as answers_list)
+   #    These labels come from your mapping.config.json (answer_key_to_question),
+   #    but we fall back to sensible defaults if mapping is absent.
+   qmap = {
+       "who":      "Q1. Who are you purchasing for?",
+       "gender":   "Q2. Gender",
+       "occasion": "Q3. Occasion",
+       "purpose":  "Q4. Purpose",
+   }
+   questions = [qmap["who"], qmap["gender"], qmap["occasion"], qmap["purpose"]]
+   # 5) assemble the backend JSON
+   sent_json = {
+       "questions":   questions,
+       "answers":     answers_list,
+       "request_id":  request_id,
+       "email":       email,
+       "name":        name,
+       "phoneNumber": phoneNumber,
+       "birth_date":  birth_date,
+   }
+   # 6) sanity: fail fast if required fields missing
+   missing = [k for k in REQUIRED_KEYS if not sent_json.get(k)]
+   if missing:
+       # Raise 422: adapter will return a clear error to you instead of 500 from backend
+       raise HTTPException(
+           status_code=422,
+           detail={"error": "missing_required_fields", "fields": missing, "sent_json": sent_json},
+       )
+   # 7) sanity: questions ↔ answers length
+   if len(sent_json["questions"]) != len(sent_json["answers"]):
+       raise HTTPException(
+           status_code=422,
+           detail={"error": "questions_answers_length_mismatch",
+                   "q_len": len(sent_json["questions"]),
+                   "a_len": len(sent_json["answers"]),
+                   "sent_json": sent_json},
+       )
+   return sent_json
 
 # --------- Routes ---------
 
