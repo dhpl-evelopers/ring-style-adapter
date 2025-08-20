@@ -1,434 +1,361 @@
-import os, json, uuid
+# app.py
+import os
+import json
+import logging
+import pathlib
+from typing import Any, Dict, List, Tuple
 
-from fastapi import FastAPI, Request, HTTPException, Query
+import httpx
+from fastapi import FastAPI, Body, Query, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from fastapi.responses import JSONResponse, Response
+# -------------------------
+# Logging
+# -------------------------
+log = logging.getLogger("adapter")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-app = FastAPI()
+# -------------------------
+# FastAPI
+# -------------------------
+app = FastAPI(title="Ring Style Adapter (flex → JSON)", version="1.0.0", openapi_url="/openapi.json")
 
-@app.post("/ingest")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
+)
 
-async def ingest(request: Request, preview: bool = Query(False), echo: bool = Query(False)):
+# -------------------------
+# Environment
+# -------------------------
+# Example:
+#   BACKEND_POST_URL=https://projectaiapi-xxxx.azurewebsites.net/createRequestJSON
+#   BACKEND_GET_URL =https://projectaiapi-xxxx.azurewebsites.net/fetchResponse?response_id=
+BACKEND_POST_URL = os.getenv("BACKEND_POST_URL", "").strip()
+BACKEND_GET_URL  = os.getenv("BACKEND_GET_URL", "").strip()
 
-    # 1. Load mapping configuration dynamically from file
+API_KEY_REQUIRED = os.getenv("API_KEY_REQUIRED", "false").lower() == "true"
+API_KEY          = os.getenv("API_KEY", "")
 
-    config_path = os.path.join(os.path.dirname(__file__) if "__file__" in globals() else ".", "mapping.config.json")
+# -------------------------
+# Config (mapping.config.json)
+# -------------------------
+CFG_PATH = pathlib.Path(__file__).with_name("mapping.config.json")
 
+def _load_config() -> Dict[str, Any]:
+    """Load mapping.config.json from the same folder as app.py"""
     try:
-
-        with open(config_path, "r") as cfg:
-
-            config = json.load(cfg)
-
-        print(f"Loaded mapping config from {config_path}")
-
+        log.info("Reading mapping config from %s", CFG_PATH)
+        with open(CFG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception as e:
-
-        # Configuration file load failure
-
-        print(f"Error loading config: {e}")
-
-        raise HTTPException(status_code=500, detail=f"Configuration load error: {e}")
-
-    # 2. Normalize UI-facing keys to backend-expected field names
-
-    # Update field_map for any keys not covered (e.g., CamelCase to snake_case)
-
-    field_map = config.get("field_map", {})
-
-    field_map["phone"] = "phone_number"        # e.g. "phone" -> "phone_number"
-
-    field_map["phone_number"] = "phone_number" # e.g. "phone_number" -> "phone_number"
-
-    field_map["phoneNumber"] = "phone_number"  # e.g. "phoneNumber" -> "phone_number"
-
-    field_map["birthDate"] = "birth_date"      # e.g. "birthDate" -> "birth_date"
-
-    config["field_map"] = field_map
-
-    # Adjust default values keys if needed (match normalized field names)
-
-    defaults = config.get("defaults", {})
-
-    if "phoneNumber" in defaults:
-
-        defaults["phone_number"] = defaults.get("phoneNumber", "")
-
-        defaults.pop("phoneNumber", None)
-
-    if "birthDate" in defaults:
-
-        defaults["birth_date"] = defaults.get("birthDate", "")
-
-        defaults.pop("birthDate", None)
-
-    config["defaults"] = defaults
-
-    # Parse JSON body from the incoming request
-
-    try:
-
-        body = await request.json()
-
-    except Exception:
-
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
-
-    print("Received request body:", body)
-
-    normalized_data = {}
-
-    processed_keys = set()
-
-    # Map each UI key to the backend key using field_map
-
-    for alias, canonical in config.get("field_map", {}).items():
-
-        if alias in body:
-
-            normalized_data[canonical] = body[alias]
-
-            processed_keys.add(alias)
-
-            processed_keys.add(canonical)
-
-            if alias != canonical:
-
-                print(f"Normalized field '{alias}' to '{canonical}': {body[alias]}")
-
-            else:
-
-                print(f"Kept field '{alias}' as '{canonical}': {body[alias]}")
-
-    # Copy over any remaining expected fields (already in correct form) that weren't processed
-
-    for field in config.get("defaults", {}):
-
-        if field in body and field not in processed_keys:
-
-            normalized_data[field] = body[field]
-
-            processed_keys.add(field)
-
-            print(f"Preserved field '{field}': {body[field]}")
-
-    # 3. Determine request_id (use provided one or generate a new UUID)
-
-    request_id = None
-
-    # Check known candidate fields for an existing request identifier
-
-    for key in config.get("result_key_field_candidates", []):
-
-        if key in body:
-
-            request_id = body[key]
-
-            print(f"Using request id from '{key}': {request_id}")
-
-            break
-
-    # Also check common variations (camelCase or snake_case)
-
-    if request_id is None:
-
-        if "requestId" in body:
-
-            request_id = body["requestId"]
-
-            print(f"Using request id from 'requestId': {request_id}")
-
-        elif "request_id" in body:
-
-            request_id = body["request_id"]
-
-            print(f"Using request id from 'request_id': {request_id}")
-
-    # Generate a new request_id if none was provided
-
-    if request_id is None:
-
-        request_id = str(uuid.uuid4())
-
-        print(f"No request id provided; generated new UUID: {request_id}")
-
-    # 4. Map question text to each answer using mapping.config and apply logic for mapping sheets
-
-    if "answers" not in body or not isinstance(body["answers"], list):
-
-        raise HTTPException(status_code=400, detail="Request must include an 'answers' list")
-
-    answers_input = body["answers"]
-
-    questions_list = []
-
-    answers_list = []
-
-    answer_map = {}  # to store answers by their key (if keys provided)
-
-    # Retrieve the mapping of answer keys to question text from config
-
-    key_to_question = config.get("answer_key_to_question", {})
-
-    # Iterate through answers list and build questions_list and answers_list
-
-    if answers_input and isinstance(answers_input[0], dict):
-
-        # Answers are provided as a list of objects (with question identifiers)
-
-        for ans_obj in answers_input:
-
-            q_key = None
-
-            ans_val = None
-
-            # Identify the question key
-
-            if "questionId" in ans_obj:
-
-                q_key = ans_obj["questionId"]
-
-            elif "key" in ans_obj:
-
-                q_key = ans_obj["key"]
-
-            # Identify the answer value
-
-            if "answer" in ans_obj:
-
-                ans_val = ans_obj["answer"]
-
-            elif "value" in ans_obj:
-
-                ans_val = ans_obj["value"]
-
-            # Handle format like {"Some Question?": "Answer"} if no explicit key field
-
-            if ans_val is None and q_key is None and len(ans_obj) == 1:
-
-                q_key, ans_val = next(iter(ans_obj.items()))
-
-            # Determine the question text
-
-            if q_key:
-
-                answer_map[q_key] = ans_val
-
-                question_text = key_to_question.get(q_key)
-
-                if not question_text:
-
-                    # If no mapping found for this key, use the key itself as fallback
-
-                    question_text = q_key
-
-                    print(f"Warning: No question text mapping for key '{q_key}', using key as text.")
-
-            else:
-
-                # If no key but question text is provided directly in object
-
-                question_text = ans_obj.get("question")
-
-            if question_text is None:
-
-                # Unrecognized answer format, skip this entry
-
-                print(f"Warning: Unrecognized answer format: {ans_obj}")
-
-                continue
-
-            questions_list.append(question_text)
-
-            answers_list.append(ans_val)
-
-            print(f"Mapped '{question_text}' -> '{ans_val}'")
-
-    else:
-
-        # Answers are provided as a simple list of values (assumed in fixed order)
-
-        for idx, ans_val in enumerate(answers_input):
-
-            # Get the corresponding question key by index
-
-            q_key = list(key_to_question.keys())[idx] if idx < len(key_to_question) else None
-
-            question_text = key_to_question.get(q_key) if q_key else None
-
-            if q_key:
-
-                answer_map[q_key] = ans_val
-
-            if question_text is None:
-
-                # If we don't have a mapping (index out of range or missing key), use generic placeholder
-
-                question_text = f"Q{idx+1}"
-
-                print(f"Warning: No mapping for answer at position {idx}, using '{question_text}' as question text")
-
-            else:
-
-                print(f"Matched answer {idx}: '{question_text}' -> '{ans_val}'")
-
-            questions_list.append(question_text)
-
-            answers_list.append(ans_val)
-
-    # Determine which mapping sheet to use (for internal logic/debugging)
-
-    mapping_sheet = None
-
-    who_value = answer_map.get("who") or answer_map.get("purchase")
-
-    if who_value is None and answers_list:
-
-        # If answers provided without keys, use first answer as "who" (purchase-for)
-
-        who_value = answers_list[0]
-
-    if isinstance(who_value, str):
-
-        who_lower = who_value.strip().lower()
-
-        if who_lower == "self":
-
-            mapping_sheet = "Self"
-
-        elif who_lower in ["others", "other"]:
-
-            # For "others", determine gender to pick male/female mapping
-
-            gender_val = answer_map.get("gender")
-
-            if gender_val is None and len(answers_list) > 1:
-
-                gender_val = answers_list[1]
-
-            if gender_val:
-
-                gender_lower = str(gender_val).strip().lower()
-
-                if gender_lower in ["female", "f"]:
-
-                    mapping_sheet = "Others - Female"
-
-                elif gender_lower in ["male", "m"]:
-
-                    mapping_sheet = "Others - Male"
-
-                else:
-
-                    mapping_sheet = "Others"
-
-            else:
-
-                mapping_sheet = "Others"
-
-    print(f"Selected mapping sheet: {mapping_sheet}")
-
-    # 5. Build the transformed payload with questions, answers, request_id, and user profile fields
-
-    # Ensure any missing user profile fields are filled with default values
-
-    for field, default_val in config.get("defaults", {}).items():
-
-        if field not in normalized_data:
-
-            normalized_data[field] = default_val
-
-            if default_val:
-
-                print(f"Field '{field}' missing in input, using default: {default_val}")
-
-            else:
-
-                print(f"Field '{field}' missing in input, defaulting to empty string")
-
-    # Construct payload structure expected by backend
-
-    payload = {
-
-        "request_id": request_id,
-
-        "questions": questions_list,
-
-        "answers": answers_list
-
-    }
-
-    # Add normalized profile fields to payload
-
-    for field in config.get("defaults", {}):
-
-        if field in normalized_data:
-
-            payload[field] = normalized_data[field]
-
-    print("Transformed payload ready:", payload)
-
-    # 6. Forward the normalized request to the backend (unless in preview mode)
-
-    if preview:
-
-        # 7. If preview=true, return the transformed payload without forwarding
-
-        return JSONResponse(content=payload, status_code=200)
-
-    backend_url = os.getenv("BACKEND_POST_URL")
-
-    if not backend_url:
-
+        log.error("Could not read mapping.config.json: %s", e)
+        return {}
+
+CONFIG                 = _load_config()
+XML_ROOT               = CONFIG.get("xml_root", "request")
+FIELD_MAP: Dict[str,str]= {k.lower(): v for k,v in CONFIG.get("field_map", {}).items()}
+ANS_KEY_TO_Q: Dict[str,str] = CONFIG.get("answer_key_to_question", {})
+RESULT_KEY_CANDIDATES  = [s.lower() for s in CONFIG.get("result_key_field_candidates", ["result_key","response_id","resultkey","responsekey"])]
+DEFAULTS               = CONFIG.get("defaults", {})
+
+# -------------------------
+# Helpers
+# -------------------------
+def _require_backend():
+    if not BACKEND_POST_URL:
         raise HTTPException(status_code=500, detail="BACKEND_POST_URL is not configured")
 
-    # Send the request to the actual backend URL
+def _check_api_key(req: Request):
+    if not API_KEY_REQUIRED:
+        return
+    if not API_KEY or req.headers.get("x-api-key") != API_KEY:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+def _flatten(d: Any) -> Dict[str, Any]:
+    flat: Dict[str, Any] = {}
+    def visit(prefix: str, node: Any):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                visit(f"{prefix}.{k}" if prefix else k, v)
+        elif isinstance(node, list):
+            flat[prefix] = node
+            for i, v in enumerate(node):
+                visit(f"{prefix}[{i}]", v)
+        else:
+            flat[prefix] = node
+    visit("", d)
+    return flat
+
+def _find_result_key(d: Dict[str, Any]) -> str:
+    # look top-level first
+    for k in d.keys():
+        if k.lower() in RESULT_KEY_CANDIDATES:
+            return str(d[k])
+    # search nested
+    for v in d.values():
+        if isinstance(v, dict):
+            rk = _find_result_key(v)
+            if rk:
+                return rk
+    return ""
+
+def _extract_identity(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Map any identity-like fields from flexible payload into the backend keys
+    according to FIELD_MAP and DEFAULTS.
+    """
+    out = dict(DEFAULTS)
+    flat = _flatten(raw)
+
+    # Prefer explicit top-level names commonly used
+    for cand_in, cand_out in [
+        ("request_id", "request_id"),
+        ("result_key", "request_id"),    # sometimes called result_key
+        ("resultkey", "request_id"),
+        ("response_id", "request_id"),
+        ("name", "name"),
+        ("full_name", "name"),
+        ("email", "email"),
+        ("phone", "phoneNumber"),
+        ("phone_number", "phoneNumber"),
+        ("phonenumber", "phoneNumber"),
+        ("birth_date", "birth_date"),
+        ("date", "birth_date"),
+        ("dob", "birth_date"),
+    ]:
+        for k, v in raw.items():
+            if k.lower() == cand_in and v not in (None, "", []):
+                out[cand_out] = v
+
+    # Then run generic map by FIELD_MAP on any flat keys
+    for k, v in flat.items():
+        leaf = k.split(".")[-1].split("[")[0].lower()
+        if leaf in FIELD_MAP:
+            out[FIELD_MAP[leaf]] = v
+
+    # If request_id still missing, try nested result key
+    if "request_id" not in out or not str(out.get("request_id")).strip():
+        rk = _find_result_key(raw)
+        if rk:
+            out["request_id"] = rk
+
+    return out
+
+def _extract_qna_from_quizell(raw: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """
+    Accepts Quizell-style structure:
+      raw["questionAnswers"] = [
+        {"question": "Q1. Who are you purchasing for?", "selectedOption": {"value": "Self"}},
+        ...
+      ]
+    Returns list of (question, answer)
+    """
+    pairs: List[Tuple[str, str]] = []
+    qa_list = raw.get("questionAnswers") or raw.get("question_answers") or raw.get("questionanswers")
+    if isinstance(qa_list, list):
+        for item in qa_list:
+            if not isinstance(item, dict):
+                continue
+            q = str(item.get("question", "")).strip()
+            ans = None
+            sel = item.get("selectedOption") or item.get("selected_option")
+            if isinstance(sel, dict):
+                ans = sel.get("value") or sel.get("label")
+            if ans is None:
+                # fallback to direct value if present
+                ans = item.get("answer") or item.get("value")
+            if q and ans is not None:
+                pairs.append((q, str(ans).strip()))
+    return pairs
+
+def _extract_qna_from_simple_keys(raw: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """
+    Accepts simple UI forms like:
+      {"purchase_for": "self", "gender": "female", "occasion": "engagement", "purpose": "daily wear"}
+    Uses ANS_KEY_TO_Q mapping from mapping.config.json to translate keys -> question text
+    """
+    pairs: List[Tuple[str, str]] = []
+    for k, v in raw.items():
+        map_q = ANS_KEY_TO_Q.get(k.lower())
+        if map_q and v not in (None, ""):
+            pairs.append((map_q, str(v)))
+    return pairs
+
+def _ensure_qna_lists(raw: Dict[str, Any]) -> Tuple[List[str], List[str], Dict[str, Any]]:
+    """
+    Produce ordered questions & answers lists from whatever the UI sent.
+    Also returns a 'context' dict with extra mapped fields (purchase_for/gender/occasion/purpose if given).
+    """
+    # 1) Direct lists already supplied
+    if isinstance(raw.get("questions"), list) and isinstance(raw.get("answers"), list):
+        qs = [str(q) for q in raw["questions"]]
+        ans = [str(a) if a is not None else "" for a in raw["answers"]]
+        return qs, ans, {}
+
+    # 2) Quizell-like array
+    qa_pairs = _extract_qna_from_quizell(raw)
+    if qa_pairs:
+        qs = [q for (q, _) in qa_pairs]
+        ans = [a for (_, a) in qa_pairs]
+        return qs, ans, {}
+
+    # 3) Keyed simple form
+    simple_pairs = _extract_qna_from_simple_keys(raw)
+    if simple_pairs:
+        # Keep the order defined by ANS_KEY_TO_Q values appearance
+        order = [ANS_KEY_TO_Q[k] for k in ANS_KEY_TO_Q]  # question text in desired order
+        # Build a map question->answer from what user provided
+        got = {q: a for (q, a) in simple_pairs}
+        qs, ans = [], []
+        ctx = {}
+        for q in order:
+            qs.append(q)
+            ans.append(got.get(q, ""))
+
+        # also expose a compact context for debugging
+        # reverse-map back to friendly keys if present in raw
+        for k in ANS_KEY_TO_Q.keys():
+            if k in raw:
+                ctx[k] = raw[k]
+        return qs, ans, ctx
+
+    # 4) Fallback: nothing recognized
+    return [], [], {}
+
+def _build_backend_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Build the final JSON your backend expects:
+      {
+        "questions": "Q1..., Q2..., ...",
+        "answers":   "ans1, ans2, ...",
+        "request_id": "...",
+        "email": "...", "name": "...", "phoneNumber": "...", "birth_date": "..."
+      }
+    """
+    ident = _extract_identity(raw)
+    questions, answers, ctx = _ensure_qna_lists(raw)
+
+    # Join with comma+space, because backend splits on comma.
+    q_str = ", ".join(questions)
+    a_str = ", ".join(answers)
+
+    payload = {
+        "questions":  q_str,
+        "answers":    a_str,
+        "request_id": ident.get("request_id", ""),
+        "email":      ident.get("email", ""),
+        "name":       ident.get("name", ""),
+        "phoneNumber":ident.get("phoneNumber", ""),
+        "birth_date": ident.get("birth_date", ""),
+    }
+
+    return payload
+
+# -------------------------
+# Routes
+# -------------------------
+@app.get("/")
+def root():
+    return {"ok": True, "service": "Ring Style Adapter (flex → JSON)"}
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+@app.post("/ingest")
+async def ingest(
+    raw: Dict[str, Any] = Body(..., description="Flexible UI JSON"),
+    preview: bool = Query(False, description="Return normalized JSON without calling backend"),
+    echo: bool = Query(False, description="Return backend status + body"),
+    req: Request = None,
+):
+    """
+    Accept flexible UI JSON, normalize to backend expected JSON and optionally call backend.
+    """
+    _check_api_key(req)
+    _require_backend()
 
     try:
+        # normalize
+        backend_json = _build_backend_payload(raw)
 
-        import httpx
+        # quick sanity (these are what backend logs actually use)
+        missing = [k for k in ["request_id", "name", "email"] if not str(backend_json.get(k, "")).strip()]
+        if missing:
+            log.warning("Normalized JSON missing fields: %s", missing)
 
-        async with httpx.AsyncClient() as client:
+        # If only preview, do not call backend
+        if preview:
+            return {"sent_json": backend_json, "context": raw.get("context", {})}
 
-            backend_resp = await client.post(backend_url, json=payload)
+        # Call backend /createRequestJSON
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(BACKEND_POST_URL, json=backend_json)
+            status = resp.status_code
+            body_txt = resp.text
+            try:
+                body_json = resp.json()
+            except Exception:
+                body_json = None
 
-    except Exception as exc:
+        # Optionally echo backend result
+        if echo:
+            return {
+                "sent_json": backend_json,
+                "backend_status": status,
+                "backend_headers": {"content-type": resp.headers.get("content-type", "")},
+                "backend_body": body_json if body_json is not None else body_txt,
+            }
 
-        # Networking or connection error
+        # Default minimal response
+        return {"status": "ok", "request_id": backend_json.get("request_id", "")}
 
-        print(f"Error forwarding to backend: {exc}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("ingest failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
-        raise HTTPException(status_code=502, detail=f"Failed to forward request: {exc}")
 
-    # 8. If echo=true, include backend response status and body in the output
-
-    if echo:
-
+# -------------------------
+# (Optional) simple passthroughs for testing
+# -------------------------
+@app.post("/createRequestJSON")
+async def passthrough_create_request_json(body: Dict[str, Any] = Body(...)):
+    """
+    If you want to call the adapter with exact backend shape (for direct tests),
+    this endpoint simply forwards to BACKEND_POST_URL.
+    """
+    _require_backend()
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(BACKEND_POST_URL, json=body)
         try:
+            return JSONResponse(status_code=r.status_code, content=r.json())
+        except Exception:
+            return JSONResponse(status_code=r.status_code, content={"body": r.text})
 
-            backend_body = backend_resp.json()
 
-        except ValueError:
+@app.get("/fetchResponse")
+async def passthrough_fetch_response(response_id: str):
+    """Optional helper that forwards to the backend GET endpoint if provided."""
+    if not BACKEND_GET_URL:
+        raise HTTPException(status_code=501, detail="BACKEND_GET_URL is not configured")
+    url = BACKEND_GET_URL
+    if not url.endswith("="):
+        # allow both .../fetchResponse?response_id=  OR a templated URL
+        if "response_id=" not in url:
+            if "?" in url:
+                url = url + "&response_id="
+            else:
+                url = url + "?response_id="
+    url = url + response_id
 
-            backend_body = backend_resp.text  # fallback to text if not JSON
-
-        result = {
-
-            "backend_status": backend_resp.status_code,
-
-            "backend_response": backend_body
-
-        }
-
-        print("Backend response (echo mode):", result)
-
-        return JSONResponse(content=result, status_code=200)
-
-    # 6/9. Otherwise, return the backend's response directly (status code and content)
-
-    return Response(content=backend_resp.content,
-
-                    status_code=backend_resp.status_code,
-
-                    media_type=backend_resp.headers.get("content-type", "application/json"))
- 
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.get(url)
+        try:
+            return JSONResponse(status_code=r.status_code, content=r.json())
+        except Exception:
+            return JSONResponse(status_code=r.status_code, content={"body": r.text})
