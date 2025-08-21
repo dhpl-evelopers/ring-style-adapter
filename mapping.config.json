@@ -10,9 +10,7 @@
 
         "birth_date": "birth_date",
 
-        "request_id": "result_key",
-
-        "phone_number": "phone_number"
+        "request_id": "request_id"
 
     },
 
