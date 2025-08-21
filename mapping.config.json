@@ -1,37 +1,23 @@
 {
- "xml_root": "request",
- "result_key_field_candidates": [
-   "request_id",
-   "result_key",
-   "response_id",
-   "responseKey",
-   "resultKey"
- ],
+ "xml_root": "Request",
  "field_map": {
-   "full_name": "name",
-   "name": "name",
-   "email": "email",
-   "phone": "phone_number",
-   "phone_number": "phone_number",
-   "birth_date": "birth_date",
-   "date": "birth_date"
+   "full_name": "FullName",
+   "email": "Email",
+   "phone_number": "PhoneNumber",
+   "birth_date": "BirthDate",
+   "request_id": "RequestID",
+   "result_key": "RequestID"
  },
  "answer_key_to_question": {
-   "who": "Q1. Purchase For",
-   "gender": "Q2. Gender",
-   "occasion": "Q3. Occasion",
-   "purpose": "Q4. Purpose"
+   "who": "Who are you?",
+   "gender": "Gender",
+   "occasion": "Occasion",
+   "purpose": "Purpose"
  },
- "questionOrder": [
-   "who",
-   "gender",
-   "occasion",
-   "purpose"
- ],
  "defaults": {
-   "name": "",
-   "email": "",
-   "phone_number": "",
-   "birth_date": ""
+   "FullName": "",
+   "Email": "",
+   "PhoneNumber": "",
+   "BirthDate": ""
  }
 }
