@@ -2,318 +2,256 @@ import os
 import json
 import logging
 import pathlib
-from typing import Any, Dict, List, Optional, Tuple
 import httpx
-from fastapi import FastAPI, Body, Query, Request, HTTPException
+from typing import Any, Dict, List, Optional, Tuple
+from fastapi import FastAPI, Request, HTTPException, Body, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-app = FastAPI(title="Ring Style Adapter (flex → XML)")
-# ---- CORS (open by default; tighten if needed)
+from dicttoxml import dicttoxml
+
+# FastAPI app setup
+app = FastAPI(title="Adapter (Flexible JSON → XML)")
 app.add_middleware(
-   CORSMiddleware,
-   allow_origins=["*"],
-   allow_credentials=True,
-   allow_methods=["*"],
-   allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-# ---- Config & env
+
+# Load config from mapping.config.json (must exist next to this script)
 CFG_PATH = pathlib.Path(__file__).with_name("mapping.config.json")
+if not CFG_PATH.exists():
+    raise RuntimeError(f"Config file not found at {CFG_PATH}")
+with CFG_PATH.open("r", encoding="utf-8") as f:
+    CONFIG = json.load(f)
+
+# Backend endpoint from environment
 BACKEND_POST_URL = os.getenv("BACKEND_POST_URL", "").strip()
-API_KEY = os.getenv("API_KEY", "").strip()  # optional; if set we expect X-API-Key header
+API_KEY = os.getenv("API_KEY", "").strip()
 log = logging.getLogger("uvicorn.error")
 
-def _load_config() -> Dict[str, Any]:
-   if not CFG_PATH.exists():
-       raise RuntimeError(f"mapping.config.json not found at {CFG_PATH}")
-   with CFG_PATH.open("r", encoding="utf-8") as f:
-       return json.load(f)
-
-CONFIG = _load_config()
-
-# ---------- Helpers: auth & safety
-def _check_api_key(req: Request) -> None:
-   """Optional simple key check: if API_KEY is set, require header X-API-Key."""
-   if not API_KEY:
-       return
-   got = req.headers.get("x-api-key") or req.headers.get("X-Api-Key")
-   if got != API_KEY:
-       raise HTTPException(status_code=401, detail="Invalid API key")
-
 def _require_backend():
-   if not BACKEND_POST_URL:
-       raise HTTPException(
-           status_code=500,
-           detail="BACKEND_POST_URL not configured in environment",
-       )
+    if not BACKEND_POST_URL:
+        raise HTTPException(status_code=500, detail="BACKEND_POST_URL not configured")
 
-# ---------- Input normalization
+def _check_api_key(req: Request):
+    """If API_KEY is set, require header X-API-Key."""
+    if not API_KEY:
+        return
+    got = req.headers.get("x-api-key") or req.headers.get("X-Api-Key")
+    if got != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+def _coalesce(*values: Any) -> Optional[Any]:
+    """Return the first value that is non-null/non-empty."""
+    for v in values:
+        if v not in (None, ""):
+            return v
+    return None
+
 def _get_payload(body: Dict[str, Any]) -> Dict[str, Any]:
-   """
-   The UI may send either:
-     { ...fields..., questionAnswers: [...], answers: [...] }
-   or it may wrap everything inside { "data": { ... } }
-   """
-   return body.get("data", body)
+    """Unwrap { data: {...} } if present."""
+    return body.get("data", body)
 
-def _coalesce(*vals) -> Optional[str]:
-   for v in vals:
-       if v is not None and v != "":
-           return v
-   return None
+def _pick_user_fields(p: Dict[str, Any]) -> Tuple[str,str,str,str,str]:
+    """
+    Extract resultKey, fullName, email, phoneNumber, dateOfBirth (as date) from payload.
+    Accepts multiple aliases and uses defaults from CONFIG if missing.
+    """
+    result_key = _coalesce(p.get("result_key"), p.get("resultKey"), p.get("id"), CONFIG.get("defaults", {}).get("result_key"))
+    if not result_key:
+        raise HTTPException(status_code=400, detail="Missing mandatory field: resultKey/id")
+    full_name = _coalesce(p.get("full_name"), p.get("fullName"), CONFIG.get("defaults", {}).get("full_name", ""))
+    email = p.get("email", "") or CONFIG.get("defaults", {}).get("email", "")
+    phone = _coalesce(p.get("phone_number"), p.get("phoneNumber"), CONFIG.get("defaults", {}).get("phone_number", ""))
+    date = _coalesce(p.get("date"), p.get("dateOfBirth"), CONFIG.get("defaults", {}).get("date", ""))
+    return result_key, full_name, email, phone, date
 
-def _pick_user_fields(p: Dict[str, Any]) -> Tuple[str, str, str, str]:
-   """
-   Map multiple possible UI field names to the canonical names that the backend XML expects.
-   - result_key -> also accept resultKey or id
-   - full_name  -> also accept fullName
-   - phone_number -> also accept phoneNumber
-   - date       -> also accept dateOfBirth
-   """
-   result_key = _coalesce(p.get("result_key"), p.get("resultKey"), p.get("id"))
-   if not result_key:
-       raise HTTPException(status_code=400, detail="Missing mandatory field: result_key / resultKey / id")
-   full_name = _coalesce(p.get("full_name"), p.get("fullName"))
-   email = p.get("email", "")
-   phone_number = _coalesce(p.get("phone_number"), p.get("phoneNumber"))
-   date = _coalesce(p.get("date"), p.get("dateOfBirth"))
-   # Fill defaults from config if missing
-   defaults = CONFIG.get("defaults", {})
-   full_name = full_name or defaults.get("full_name", "")
-   email = email or defaults.get("email", "")
-   phone_number = phone_number or defaults.get("phone_number", "")
-   date = date or defaults.get("date", "")
-   return result_key, full_name, email, phone_number, date
-
-# ---------- Answers normalization
 def _detect_mode(p: Dict[str, Any]) -> str:
-   """
-   Return one of: 'structured', 'keyed', 'answers_only', or 'none'
-   """
-   if isinstance(p.get("questionAnswers"), list) and p["questionAnswers"]:
-       return "structured"
-   ans = p.get("answers")
-   if isinstance(ans, list) and ans:
-       if isinstance(ans[0], dict) and "key" in ans[0] and "value" in ans[0]:
-           return "keyed"
-       if isinstance(ans[0], str):
-           return "answers_only"
-   return "none"
+    """
+    Determine input format mode: 'structured', 'keyed', or 'answers_only'.
+    """
+    if isinstance(p.get("questionAnswers"), list) and p["questionAnswers"]:
+        return "structured"
+    ans = p.get("answers")
+    if isinstance(ans, list) and ans:
+        if isinstance(ans[0], dict) and "key" in ans[0] and "value" in ans[0]:
+            return "keyed"
+        if isinstance(ans[0], str):
+            return "answers_only"
+    return "none"
 
-def _from_structured(question_answers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-   """
-   Input like: [{questionId: 70955, selectedOption:{id:299504, value:"Self"}}, ...]
-   Return:     [{questionId: 70955, optionId: 299504, value: "Self"}, ...]
-   """
-   out = []
-   for item in question_answers:
-       qid = item.get("questionId")
-       sel = item.get("selectedOption", {}) or {}
-       out.append(
-           {
-               "questionId": qid,
-               "optionId": sel.get("id"),
-               "value": sel.get("value"),
-           }
-       )
-   return out
+def _from_structured(qas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert structured input (questionId & selectedOption) to uniform list."""
+    out = []
+    for item in qas:
+        qid = item.get("questionId")
+        sel = item.get("selectedOption") or {}
+        out.append({
+            "questionId": qid,
+            "optionId": sel.get("id"),
+            "value": sel.get("value"),
+        })
+    return out
 
-def _from_keyed(keyed: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-   """
-   Input like: [{key:"who", value:"Self"}, {key:"gender", value:"Female"}...]
-   Use config.keyToQuestionId and config.options to resolve IDs.
-   """
-   key_to_qid = CONFIG.get("keyToQuestionId", {})
-   options = CONFIG.get("options", {})
-   out = []
-   for kv in keyed:
-       key = kv.get("key")
-       val = kv.get("value")
-       qid = key_to_qid.get(str(key))
-       if not qid:
-           log.warning(f"Unknown key in mapping.config.json: {key!r}")
-           continue
-       opt_map = options.get(str(qid), {})
-       opt_id = opt_map.get(str(val)) or opt_map.get(val)
-       out.append({"questionId": qid, "optionId": opt_id, "value": val})
-   return out
+def _from_keyed(kv_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Convert keyed answers (list of {key, value}) using config mappings.
+    keyToQuestionId maps 'who'->70955, etc; options map each questionId to possible answers.
+    """
+    key_to_qid = CONFIG.get("keyToQuestionId", {})
+    options = CONFIG.get("options", {})
+    out = []
+    for kv in kv_list:
+        key = kv.get("key")
+        val = kv.get("value")
+        qid = key_to_qid.get(str(key))
+        if not qid:
+            log.warning(f"Unknown key in config: {key!r}")
+            continue
+        opt_map = options.get(str(qid), {})
+        opt_id = opt_map.get(str(val), opt_map.get(val))
+        out.append({"questionId": qid, "optionId": opt_id, "value": val})
+    return out
 
 def _from_answers_only(answers: List[str]) -> List[Dict[str, Any]]:
-   """
-   Input like: ["Self","Female", ...]
-   Use config.questionOrder list to map by index.
-   """
-   order = CONFIG.get("questionOrder", [])
-   out = []
-   for idx, val in enumerate(answers):
-       if idx >= len(order):
-           log.warning("Answer index %s has no questionOrder mapping", idx)
-           break
-       qid = order[idx]
-       opt_map = CONFIG.get("options", {}).get(str(qid), {})
-       opt_id = opt_map.get(str(val)) or opt_map.get(val)
-       out.append({"questionId": qid, "optionId": opt_id, "value": val})
-   return out
+    """
+    Convert a list of string answers by position. Use CONFIG['questionOrder'] to map index->questionId.
+    """
+    order = CONFIG.get("questionOrder", [])
+    out = []
+    for idx, val in enumerate(answers):
+        if idx >= len(order):
+            log.warning(f"Answer index {idx} has no questionOrder mapping")
+            break
+        qid = order[idx]
+        opt_map = CONFIG.get("options", {}).get(str(qid), {})
+        opt_id = opt_map.get(str(val), opt_map.get(val))
+        out.append({"questionId": qid, "optionId": opt_id, "value": val})
+    return out
 
 def _build_qna(p: Dict[str, Any]) -> List[Dict[str, Any]]:
-   mode = _detect_mode(p)
-   if mode == "structured":
-       return _from_structured(p["questionAnswers"])
-   if mode == "keyed":
-       return _from_keyed(p["answers"])
-   if mode == "answers_only":
-       return _from_answers_only(p["answers"])
-   raise HTTPException(
-       status_code=400,
-       detail="No answers provided. Send either questionAnswers[], answers[] (keyed), or answers[] (strings).",
-   )
+    mode = _detect_mode(p)
+    if mode == "structured":
+        return _from_structured(p["questionAnswers"])
+    if mode == "keyed":
+        return _from_keyed(p["answers"])
+    if mode == "answers_only":
+        return _from_answers_only(p["answers"])
+    raise HTTPException(
+        status_code=400,
+        detail="No answers provided. Expect questionAnswers[], or answers[] (keyed), or answers[] (list of strings)."
+    )
 
-# ---------- XML builder
-def _xml_escape(s: Optional[str]) -> str:
-   if s is None:
-       return ""
-   return (
-       str(s)
-       .replace("&", "&amp;")
-       .replace("<", "&lt;")
-       .replace(">", "&gt;")
-       .replace('"', "&quot;")
-       .replace("'", "&apos;")
-   )
+def _build_xml(result_key: str, full_name: str, email: str, phone: str, date: str, qna: List[Dict[str, Any]]) -> str:
+    """
+    Build the XML payload as a string. We put the Q&A list as a JSON string inside <questionAnswers>.
+    """
+    # Optional: enrich with question text if config provides it
+    qid_to_text = CONFIG.get("qidToText", {})
+    enriched = []
+    for it in qna:
+        qid = it.get("questionId")
+        enriched.append({
+            "question": qid_to_text.get(str(qid)),
+            "questionId": qid,
+            "isMasterQuestion": False,
+            "questionType": "singleAnswer",
+            "selectedOption": {
+                "id": it.get("optionId"),
+                "value": it.get("value"),
+                "image": None,
+                "score_value": 0
+            },
+        })
+    # Serialize enriched Q&A list as JSON (embedded inside XML)
+    qa_json = json.dumps(enriched, ensure_ascii=False)
+    # Build dict for XML
+    data = {
+        "id": result_key,
+        "quiz_id": "",
+        "full_name": full_name,
+        "email": email,
+        "phone_number": phone,
+        "date": date,
+        "custom_inputs": [],   # empty lists become empty tags
+        "products": [],
+        "questionAnswers": qa_json  # JSON string as element text
+    }
+    # Convert to XML bytes, then decode to string
+    xml_bytes = dicttoxml(data, custom_root="data", attr_type=False)
+    return xml_bytes.decode("utf-8")
 
-def _build_xml(
-   result_key: str,
-   full_name: str,
-   email: str,
-   phone_number: str,
-   date: str,
-   qna: List[Dict[str, Any]],
-) -> str:
-   """
-   Produce exactly what your backend log stream shows:
-<data>
-<id>...</id>
-<quiz_id>...</quiz_id>          (left empty)
-<full_name>...</full_name>
-<email>...</email>
-<phone_number>...</phone_number>
-<date>YYYY-MM-DD</date>
-<custom_inputs></custom_inputs> (empty)
-<products></products>           (empty)
-<questionAnswers>
-       [{ 'question': 'Q1. ...', 'questionId': 70955, 'isMasterQuestion': false,
-          'questionType': 'singleAnswer',
-          'selectedOption': {'id': 299504, 'value': 'Self', 'image': null, 'score_value': 0}} ...]
-</questionAnswers>
-</data>
-   Note: We embed the questionAnswers JSON text inside the XML like the backend expects.
-   """
-   # Attempt to add 'question' text via mapping (optional)
-   qid_to_text = CONFIG.get("qidToText", {})  # optional map { "70955": "Q1. Who are you purchasing for?" }
-   enriched = []
-   for it in qna:
-       qid = it.get("questionId")
-       enriched.append(
-           {
-               "question": qid_to_text.get(str(qid)),
-               "questionId": qid,
-               "isMasterQuestion": False,
-               "questionType": "singleAnswer",
-               "selectedOption": {
-                   "id": it.get("optionId"),
-                   "value": it.get("value"),
-                   "image": None,
-                   "score_value": 0,
-               },
-           }
-       )
-   qa_json = json.dumps(enriched, ensure_ascii=False)
-   xml = (
-       "<data>"
-       f"<id>{_xml_escape(result_key)}</id>"
-       "<quiz_id></quiz_id>"
-       f"<full_name>{_xml_escape(full_name)}</full_name>"
-       f"<email>{_xml_escape(email)}</email>"
-       f"<phone_number>{_xml_escape(phone_number)}</phone_number>"
-       f"<date>{_xml_escape(date)}</date>"
-       "<custom_inputs>[]</custom_inputs>"
-       "<products>[]</products>"
-       f"<questionAnswers>{_xml_escape(qa_json)}</questionAnswers>"
-       "</data>"
-   )
-   return xml
-
-# ---------- Health + root
 @app.get("/")
 def root():
-   return {"ok": True, "service": "ring-style-adapter", "version": "1.0.0"}
+    return {"ok": True, "service": "flexible-adapter", "version": "1.0.0"}
 
 @app.get("/health")
 def health():
-   return {"ok": True}
+    return {"ok": True}
 
-# ---------- Main ingest
 @app.post("/ingest")
 async def ingest(
-   req: Request,
-   payload: Dict[str, Any] = Body(..., description="Flexible UI JSON"),
-   preview: bool = Query(False, description="If true, do not call backend; just show XML"),
-   echo: bool = Query(True, description="If true, include backend status + body in response"),
+    req: Request,
+    payload: Dict[str, Any] = Body(..., description="Flexible UI JSON payload"),
+    preview: bool = Query(False, description="If true, do not call backend; just show XML"),
+    echo: bool = Query(True, description="If true, include backend status/body in response"),
 ):
-   """
-   Accept flexible UI JSON -> normalize -> build XML -> call backend /createRequest.
-   """
-   _check_api_key(req)
-   _require_backend()
-   # 1) Normalize payload surface
-   p = _get_payload(payload)
-   # 2) User fields
-   result_key, full_name, email, phone, date = _pick_user_fields(p)
-   # 3) Answers → structured list [{questionId, optionId, value}]
-   qna = _build_qna(p)
-   if not qna:
-       raise HTTPException(status_code=400, detail="No usable answers supplied.")
-   # 4) Build XML
-   xml_body = _build_xml(result_key, full_name, email, phone, date, qna)
-   # 5) Optionally call backend
-   backend_status = None
-   backend_headers = None
-   backend_body = None
-   if not preview:
-       headers = {"Content-Type": "application/xml"}
-       # pass-through API key to backend if needed (optional)
-       if API_KEY:
-           headers["X-API-Key"] = API_KEY
-       try:
-           async with httpx.AsyncClient(timeout=30) as client:
-               resp = await client.post(BACKEND_POST_URL, content=xml_body.encode("utf-8"), headers=headers)
-           backend_status = resp.status_code
-           # capture text (backend sometimes returns text/plain)
-           backend_body = resp.text
-           backend_headers = {"content-type": resp.headers.get("content-type")}
-       except httpx.RequestError as e:
-           raise HTTPException(status_code=502, detail=f"Backend request failed: {e}") from e
-   # 6) Build adapter response
-   out = {
-       "sent_xml": xml_body,
-       "context": {
-           "result_key": result_key,
-           "full_name": full_name,
-           "email": email,
-           "phone_number": phone,
-           "date": date,
-       },
-   }
-   if echo and backend_status is not None:
-       out.update(
-           {
-               "backend_status": backend_status,
-               "backend_headers": backend_headers,
-               "backend_body": backend_body,
-           }
-       )
-   return JSONResponse(out)
+    """
+    Accept flexible UI JSON, normalize fields, build XML, and POST to backend /createRequest.
+    Returns the XML sent and (optionally) the backend response.
+    """
+    _check_api_key(req)
+    _require_backend()
 
-# ---------- Uvicorn entry (for local runs)
-if __name__ == "__main__":
-   import uvicorn
-   uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
+    # 1. Normalize payload
+    body = _get_payload(payload)
+
+    # 2. Extract user fields (resultKey, full_name, email, phone, date)
+    result_key, full_name, email, phone, date = _pick_user_fields(body)
+
+    # 3. Build questionAnswers list
+    qna_list = _build_qna(body)
+    if not qna_list:
+        raise HTTPException(status_code=400, detail="No valid answers supplied")
+
+    # 4. Build XML payload
+    xml_body = _build_xml(result_key, full_name, email, phone, date, qna_list)
+
+    backend_status = None
+    backend_headers = None
+    backend_body = None
+
+    # 5. Optionally call backend
+    if not preview:
+        headers = {"Content-Type": "application/xml"}
+        if API_KEY:
+            headers["X-API-Key"] = API_KEY
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(BACKEND_POST_URL, content=xml_body.encode("utf-8"), headers=headers)
+            backend_status = resp.status_code
+            backend_body = resp.text
+            backend_headers = {"content-type": resp.headers.get("content-type")}
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
+
+    # 6. Construct response
+    result = {
+        "sent_xml": xml_body,
+        "context": {
+            "result_key": result_key,
+            "full_name": full_name,
+            "email": email,
+            "phone_number": phone,
+            "date": date,
+        }
+    }
+    if echo and backend_status is not None:
+        result.update({
+            "backend_status": backend_status,
+            "backend_headers": backend_headers,
+            "backend_body": backend_body,
+        })
+    return JSONResponse(result)
