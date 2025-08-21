@@ -1,113 +1,138 @@
-import os
-import json
+import json, os, pathlib
+from typing import Any, Dict, List, Optional
+from fastapi import FastAPI, HTTPException, Header
 import httpx
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
-from xml.etree.ElementTree import Element, SubElement, tostring
-app = FastAPI()
-# Load mapping config on startup
-with open("mapping.config.json") as f:
-   mapping = json.load(f)
-# Backend endpoint (could be set via environment variable)
-BACKEND_URL = os.getenv("BACKEND_URL", "http://backend-service") + "/createRequest"
+import html
+app = FastAPI(title="Ring Style Adapter (flexible JSON to XML)")
+# Health check endpoints
+@app.get("/")
+def health():
+   return {"ok": True}
+@app.get("/health")
+def health_check():
+   return {"ok": True}
+# Load mapping configuration
+cfg_path = pathlib.Path(__file__).with_name("mapping.config.json")
+try:
+   CFG = json.loads(cfg_path.read_text())
+except Exception:
+   # Fallback defaults if config cannot be read
+   CFG = {
+       "xml_root": "request",
+       "result_key_field_candidates": ["request_id", "result_key", "response_id", "responseKey", "resultKey"],
+       "field_map": {},
+       "answer_key_to_question": {},
+       "questionOrder": [],
+       "defaults": {"name": "", "email": "", "phone_number": "", "birth_date": ""}
+   }
+BACKEND_POST_URL = os.getenv("BACKEND_POST_URL", "http://localhost:9090/createRequest")
+API_KEY_REQUIRED = os.getenv("API_KEY_REQUIRED", "false").lower() == "true"
+API_KEY = os.getenv("API_KEY", "")
+def api_key_ok(x_api_key: Optional[str]) -> bool:
+   if not API_KEY_REQUIRED:
+       return True
+   return x_api_key == API_KEY
 @app.post("/ingest")
-async def ingest(request: Request, preview: bool = False, echo: bool = False):
-   try:
-       payload = await request.json()
-   except Exception as e:
-       raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
-   # Extract and validate the result key (maps to <result_key> tag)
-   result_key = None
-   for candidate in mapping.get("result_key_field_candidates", []):
-       if candidate in payload:
-           result_key = payload[candidate]
+async def ingest(payload: Dict[str, Any], x_api_key: Optional[str] = Header(None)):
+   # Check API key if required
+   if not api_key_ok(x_api_key):
+       raise HTTPException(status_code=401, detail="unauthorized")
+   # Determine request_id from payload using candidate keys
+   request_id = None
+   for cand in CFG.get("result_key_field_candidates", []):
+       if cand in payload:
+           request_id = payload.get(cand)
            break
-   if not result_key:
-       raise HTTPException(status_code=400, detail="Missing result_key field")
-   # Normalize and map input fields to output tag names
-   normalized = {}
-   for in_key, out_key in mapping["field_map"].items():
-       if in_key in payload:
-           normalized[out_key] = payload[in_key]
-   # Check mandatory normalized fields
-   for field in ["full_name", "email", "phone_number", "date"]:
-       if field not in normalized or not normalized[field]:
-           raise HTTPException(status_code=400, detail=f"Missing mandatory field: {field}")
-   # Build XML structure
-   root = Element(mapping.get("xml_root", "request"))
-   # Mandatory fields as XML elements
-   SubElement(root, "result_key").text = str(result_key)
-   SubElement(root, "full_name").text = str(normalized["full_name"])
-   SubElement(root, "email").text = str(normalized["email"])
-   SubElement(root, "phone_number").text = str(normalized["phone_number"])
-   SubElement(root, "date").text = str(normalized["date"])
-   # Prepare question-answer list
-   qa_list = []
-   # Case 1: Separate 'questions' and 'answers' lists
-   if isinstance(payload.get("questions"), list) and isinstance(payload.get("answers"), list):
-       questions = payload["questions"]
-       answers = payload["answers"]
-       if len(questions) != len(answers):
-           raise HTTPException(status_code=400, detail="Questions and answers list lengths do not match")
-       for q, a in zip(questions, answers):
-           qa_list.append({"question": q, "selectedOption": {"value": a}})
-   # Case 2: Single list of Q/A objects in payload['questionAnswers'] or ['answers']
-   elif isinstance(payload.get("questionAnswers"), list):
-       qa_raw = payload["questionAnswers"]
-       for item in qa_raw:
-           if "question" not in item:
-               continue
-           q = item["question"]
-           if "selectedOption" in item and "value" in item["selectedOption"]:
-               ans = item["selectedOption"]["value"]
-           elif "answer" in item:
-               ans = item["answer"]
-           else:
-               continue
-           qa_list.append({"question": q, "selectedOption": {"value": ans}})
-   elif isinstance(payload.get("answers"), list) and payload.get("answers") and isinstance(payload["answers"][0], dict):
-       # If payload['answers'] is a list of objects
-       for item in payload["answers"]:
-           if "question" not in item:
-               continue
-           q = item["question"]
-           if "selectedOption" in item and "value" in item["selectedOption"]:
-               ans = item["selectedOption"]["value"]
-           elif "answer" in item:
-               ans = item["answer"]
-           else:
-               continue
-           qa_list.append({"question": q, "selectedOption": {"value": ans}})
+   if not request_id or not isinstance(request_id, str):
+       raise HTTPException(status_code=400, detail="request_id (or equivalent) is required")
+   # Map and extract common fields (name, email, phone_number, birth_date)
+   data: Dict[str, Any] = {}
+   for input_key, output_key in CFG.get("field_map", {}).items():
+       if input_key in payload:
+           data[output_key] = payload.get(input_key)
+   name = data.get("name")
+   email = data.get("email")
+   phone = data.get("phone_number")
+   birth_date = data.get("birth_date")
+   defaults = CFG.get("defaults", {})
+   # Replace None/False/blank with defaults
+   if not name:
+       name = defaults.get("name", "")
+   if not email:
+       email = defaults.get("email", "")
+   if not phone:
+       phone = defaults.get("phone_number", "")
+   if not birth_date:
+       birth_date = defaults.get("birth_date", "")
+   # Validate and process answers
+   answers = payload.get("answers")
+   if not isinstance(answers, list) or len(answers) == 0:
+       raise HTTPException(status_code=400, detail="answers list is required")
+   first = answers[0]
+   format_type = None
+   if isinstance(first, dict):
+       if "question" in first and "answer" in first:
+           format_type = "structured_text"
+       elif "key" in first and "value" in first:
+           format_type = "keyed"
+       else:
+           raise HTTPException(status_code=422, detail="Invalid answer format")
+   elif isinstance(first, str):
+       format_type = "answers_only"
    else:
-       # Case 3: Flat answer fields (keys that map to known questions)
-       for key, question_text in mapping.get("answer_key_to_question", {}).items():
-           if key in payload:
-               qa_list.append({"question": question_text, "selectedOption": {"value": payload[key]}})
-   # Insert questionAnswers JSON as a single XML element
-   qa_json = json.dumps(qa_list)
-   SubElement(root, "questionAnswers").text = qa_json
-   # Convert XML tree to string
-   xml_bytes = tostring(root, encoding="utf-8", method="xml")
-   xml_str = xml_bytes.decode("utf-8")
-   # If preview mode, do not call backend, just return XML
-   if preview:
-       result = {"xml": xml_str}
-       return JSONResponse(content=result, status_code=200)
-   # Send XML to backend
-   try:
-       headers = {"Content-Type": "application/xml"}
-       resp = httpx.post(BACKEND_URL, content=xml_str.encode("utf-8"), headers=headers)
-   except Exception as e:
-       raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
-   # If echo is requested, include details in response
-   if echo:
-       return {
-           "sent_xml": xml_str,
-           "backend_status": resp.status_code,
-           "backend_headers": dict(resp.headers),
-           "backend_body": resp.text
-       }
-   # Otherwise just return status or empty success
-   if resp.status_code != 200:
-       raise HTTPException(status_code=resp.status_code, detail=f"Backend error: {resp.text}")
-   return JSONResponse(content={"status": "success"}, status_code=200)
+       raise HTTPException(status_code=422, detail="Invalid answer element type")
+   question_answer_pairs: List[tuple] = []
+   if format_type == "structured_text":
+       for item in answers:
+           if not isinstance(item, dict) or "question" not in item or "answer" not in item:
+               raise HTTPException(status_code=422, detail="Invalid structured answer item")
+           q = item.get("question") or ""
+           a = item.get("answer") or ""
+           question_answer_pairs.append((q, a))
+   elif format_type == "keyed":
+       map_key_to_q = CFG.get("answer_key_to_question", {})
+       for item in answers:
+           if not isinstance(item, dict) or "key" not in item or "value" not in item:
+               raise HTTPException(status_code=422, detail="Invalid keyed answer item")
+           key = item["key"]
+           a = item.get("value") or ""
+           question_text = map_key_to_q.get(key)
+           if question_text is None:
+               raise HTTPException(status_code=422, detail=f"Unknown key '{key}' in answers")
+           question_answer_pairs.append((question_text, a))
+   elif format_type == "answers_only":
+       order = CFG.get("questionOrder", [])
+       if len(answers) > len(order):
+           raise HTTPException(status_code=422, detail={"error":"too_many_answers","expected":len(order),"got":len(answers)})
+       for idx, a in enumerate(answers):
+           key = order[idx]
+           question_text = CFG.get("answer_key_to_question", {}).get(key)
+           if question_text is None:
+               raise HTTPException(status_code=422, detail=f"No question mapping for key '{key}'")
+           ans = a or ""
+           question_answer_pairs.append((question_text, ans))
+   # Build XML payload
+   root = CFG.get("xml_root", "request")
+   xml_lines: List[str] = []
+   xml_lines.append("<?xml version='1.0' encoding='utf-8'?>")
+   xml_lines.append(f"<{root}>")
+   xml_lines.append(f"  <request_id>{html.escape(request_id)}</request_id>")
+   xml_lines.append(f"  <email>{html.escape(email)}</email>")
+   xml_lines.append(f"  <name>{html.escape(name)}</name>")
+   xml_lines.append(f"  <phone_number>{html.escape(phone)}</phone_number>")
+   xml_lines.append(f"  <birth_date>{html.escape(birth_date)}</birth_date>")
+   xml_lines.append(f"  <questionAnswers>")
+   for q, a in question_answer_pairs:
+       xml_lines.append(f"    <questionAnswer>")
+       xml_lines.append(f"      <question>{html.escape(str(q))}</question>")
+       xml_lines.append(f"      <answer>{html.escape(str(a))}</answer>")
+       xml_lines.append(f"    </questionAnswer>")
+   xml_lines.append(f"  </questionAnswers>")
+   xml_lines.append(f"</{root}>")
+   xml_body = "\n".join(xml_lines)
+   # Submit to backend
+   async with httpx.AsyncClient(timeout=30) as client:
+       r = await client.post(BACKEND_POST_URL, content=xml_body, headers={"Content-Type": "application/xml"})
+   if r.status_code // 100 != 2:
+       raise HTTPException(status_code=502, detail={"backend_status": r.status_code, "body": r.text})
+   return {"status": "ok", "result_key": request_id}
