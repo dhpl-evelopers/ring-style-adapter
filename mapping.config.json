@@ -1,5 +1,7 @@
 {
 
+    "xml_root": "request",
+
     "field_map": {
 
         "name": "full_name",
@@ -38,15 +40,7 @@
 
         "purchase_for": "Who are you purchasing for?",
 
-        "gender": "Gender",
-
-        "relation": "Relation",
-
-        "profession": "Profession Category",
-
-        "occasion": "Occasion",
-
-        "purpose": "Purpose"
+        "gender": "Gender"
 
     },
 
@@ -80,8 +74,6 @@
 
         "others_female": {
 
-            "relation": "Relation",
-
             "profession": "Which Category Does Her Profession Fall In?",
 
             "occasion": "Occasion",
@@ -108,8 +100,6 @@
 
         "others_male": {
 
-            "relation": "Relation",
-
             "profession": "Which Category Does His Profession Fall In?",
 
             "occasion": "Occasion",
@@ -135,8 +125,6 @@
         },
 
         "others": {
-
-            "relation": "Relation",
 
             "profession": "Which Category Does Their Profession Fall In?",
 
