@@ -1,148 +1,208 @@
-# FastAPI Application for ingesting quiz data and forwarding as XML
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
-import logging
 import json
-import requests
+from uuid import uuid4
+import xml.etree.ElementTree as ET
+import httpx
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
+# Load mapping configuration from JSON file
+with open("mapping.config.json", "r") as f:
+   config = json.load(f)
+field_map = config["field_map"]
+id_candidates = config.get("result_key_field_candidates", [])
+defaults = config.get("defaults", {})
+answer_map = config.get("answer_key_to_question", {})
+variant_map_all = config.get("answer_key_to_question_variants", {})
+# Helper to determine variant key based on 'purchase_for' and 'gender' answers
+def get_variant_key(purchase_for_value, gender_value):
+   if not purchase_for_value:
+       return None
+   pf_val = str(purchase_for_value).strip().lower()
+   if pf_val in ["self", "myself"]:
+       return "self"
+   if pf_val in ["others", "other", "someone else"]:
+       # If purchasing for someone else, choose variant by gender
+       if gender_value:
+           g_val = str(gender_value).strip().lower()
+           if g_val == "male":
+               return "others_male"
+           elif g_val == "female":
+               return "others_female"
+       return "others"
+   # If purchase_for value directly matches a variant key (e.g., "others_male"), use it
+   if pf_val in variant_map_all:
+       return pf_val
+   return None
 app = FastAPI()
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-# Load mapping configuration
-try:
-   with open("mapping.config.json", "r") as f:
-       MAPPING_CONFIG = json.load(f)
-except Exception as e:
-   logging.error("Failed to load mapping.config.json: %s", e)
-   MAPPING_CONFIG = {}
-# Determine answer keys order
-ANSWER_KEYS_ORDER = ["purchase_for", "gender", "profession", "occasion", "purpose",
-                   "day", "weekend", "work_dress", "social_dress", "line", "painting", "word", "plan"]
-# Backend endpoint URL (base)
-BACKEND_URL = "http://your-backend-url"  # Example base URL for backend
-@app.post("/ingest")
-async def ingest(request: Request):
-   """
-   Accepts JSON payload with user metadata and quiz responses, constructs an XML, and forwards it to backend.
-   """
-   # Parse request JSON
-   try:
-       data = await request.json()
-   except Exception as e:
-       logging.error("Invalid JSON payload: %s", e)
-       raise HTTPException(status_code=400, detail="Invalid JSON payload")
-   # Use field_map from config to map input fields to output XML tags
-   field_map = MAPPING_CONFIG.get("field_map", {})
-   defaults = MAPPING_CONFIG.get("defaults", {})
-   result_key_candidates = MAPPING_CONFIG.get("result_key_field_candidates", [])
-   # Get result_key from input (either 'request_id' or 'result_key')
-   result_key_val = None
-   for key in result_key_candidates:
-       if key in data:
-           result_key_val = data[key]
+@app.post("/createRequest")
+async def create_request(input_data: dict):
+   # Map metadata fields from input to output (using field_map)
+   metadata = {}
+   for in_field, out_field in field_map.items():
+       if in_field in input_data:
+           metadata[out_field] = input_data[in_field]
+   # Apply default values for missing metadata fields
+   for field, default_val in defaults.items():
+       metadata.setdefault(field, default_val)
+   # Determine or generate request ID
+   request_id_val = None
+   for cand in id_candidates:
+       if cand in input_data and str(input_data[cand]).strip():
+           request_id_val = input_data[cand]
            break
-   if result_key_val is None:
-       logging.error("No request_id or result_key provided in input")
-       raise HTTPException(status_code=400, detail="Missing request identifier (request_id)")
-   # Map user metadata fields
-   output_fields = {}
-   for input_field, output_field in field_map.items():
-       if input_field in data:
-           output_fields[output_field] = data[input_field]
-   # Handle phone_number if present (since field_map might use 'phone')
-   if "phone_number" in data:
-       output_fields["phone_number"] = data["phone_number"]
-   # Set result_key field
-   output_fields["result_key"] = result_key_val
-   # Fill missing fields with defaults
-   for out_field, default_val in defaults.items():
-       if out_field not in output_fields:
-           output_fields[out_field] = default_val
-   # Prepare questions and answers lists
-   questions_list = []
-   answers_list = []
-   if "questions" in data and data.get("questions") is not None:
-       # Both questions and answers provided
-       questions_list = data.get("questions", [])
-       answers_list = data.get("answers", [])
-       if not isinstance(answers_list, list):
-           logging.error("Answers provided are not in list format")
-           raise HTTPException(status_code=400, detail="Answers must be a list")
-       if len(questions_list) != len(answers_list):
-           logging.error("Questions count (%d) != answers count (%d)", len(questions_list), len(answers_list))
-           raise HTTPException(status_code=400, detail="Questions and answers count do not match")
-   elif "answers" in data:
-       # Only answers provided, derive questions using mapping
-       answers_list = data.get("answers", [])
-       if not isinstance(answers_list, list):
-           logging.error("Answers provided are not in list format")
-           raise HTTPException(status_code=400, detail="Answers must be a list")
-       if not ANSWER_KEYS_ORDER or "answer_key_to_question" not in MAPPING_CONFIG:
-           logging.error("Answer-to-question mapping configuration is missing")
-           raise HTTPException(status_code=500, detail="Server configuration error: question mapping missing")
-       # Determine question variant (self, others_male, others_female, or others) based on first two answers
-       variant_key = "self"
-       if len(answers_list) > 0:
-           first_ans = str(answers_list[0]).strip().lower()
-           if "self" in first_ans:
-               variant_key = "self"
+   if not request_id_val:
+       request_id_val = str(uuid4())
+   metadata["request_id"] = str(request_id_val)
+   # Build list of question-answer pairs
+   question_answer_list = []
+   if "questionAnswers" in input_data:
+       # Input is an array of question-answer objects
+       qa_list = input_data["questionAnswers"]
+       if not isinstance(qa_list, list):
+           raise HTTPException(status_code=400, detail="'questionAnswers' must be a list")
+       # Determine context (purchase_for and gender) if present
+       pf_val = None
+       gender_val = None
+       for qa in qa_list:
+           q_field = qa.get("question")
+           if q_field == answer_map.get("purchase_for") or q_field == "purchase_for":
+               pf_val = qa.get("answer")
+           if q_field == answer_map.get("gender") or q_field == "gender":
+               gender_val = qa.get("answer")
+       variant_key = get_variant_key(pf_val, gender_val)
+       # Map each question field to text if needed
+       for qa in qa_list:
+           q_field = qa.get("question")
+           ans_text = qa.get("answer", "")
+           if q_field is None:
+               continue
+           # Determine the question text based on mapping
+           q_text = None
+           if variant_key:
+               if isinstance(q_field, str) and q_field.lower() in variant_map_all.get(variant_key, {}):
+                   q_text = variant_map_all[variant_key][q_field.lower()]
+               elif isinstance(q_field, str) and q_field in answer_map:
+                   q_text = answer_map[q_field]
            else:
-               # Not self, assume others (someone else)
-               if len(answers_list) > 1:
-                   gender_ans = str(answers_list[1]).strip().lower()
-                   if "male" in gender_ans:
-                       variant_key = "others_male"
-                   elif "female" in gender_ans:
-                       variant_key = "others_female"
-                   else:
-                       variant_key = "others"
-               else:
-                   variant_key = "others"
-       logging.info("Using question variant: %s", variant_key)
-       # Build questions_list
-       for idx, ans in enumerate(answers_list):
-           if idx >= len(ANSWER_KEYS_ORDER):
-               logging.error("More answers provided (%d) than expected (%d)", len(answers_list), len(ANSWER_KEYS_ORDER))
-               raise HTTPException(status_code=400, detail="Too many answers provided")
-           key = ANSWER_KEYS_ORDER[idx]
-           if idx < 2:
-               # Use general mapping for first two
-               question_text = MAPPING_CONFIG["answer_key_to_question"].get(key, "")
+               if isinstance(q_field, str) and q_field in answer_map:
+                   q_text = answer_map[q_field]
+           if q_text is None:
+               q_text = str(q_field)
+           question_answer_list.append((q_text, ans_text))
+   elif "questions" in input_data and "answers" in input_data:
+       # Input provides separate lists for questions and answers
+       questions = input_data["questions"]
+       answers = input_data["answers"]
+       if not isinstance(questions, list) or not isinstance(answers, list):
+           raise HTTPException(status_code=400, detail="'questions' and 'answers' must be lists of equal length")
+       if len(questions) != len(answers):
+           raise HTTPException(status_code=400, detail="Mismatch between number of questions and answers")
+       # Determine context for variant
+       pf_val = None
+       gender_val = None
+       if "purchase_for" in questions:
+           idx = questions.index("purchase_for")
+           pf_val = answers[idx] if idx < len(answers) else None
+       elif answer_map.get("purchase_for") in questions:
+           idx = questions.index(answer_map["purchase_for"])
+           pf_val = answers[idx] if idx < len(answers) else None
+       if "gender" in questions:
+           idx = questions.index("gender")
+           gender_val = answers[idx] if idx < len(answers) else None
+       elif answer_map.get("gender") in questions:
+           idx = questions.index(answer_map["gender"])
+           gender_val = answers[idx] if idx < len(answers) else None
+       variant_key = get_variant_key(pf_val, gender_val)
+       # Pair each question with its answer, mapping question text if necessary
+       for q_field, ans_text in zip(questions, answers):
+           q_text = None
+           if variant_key:
+               if isinstance(q_field, str) and q_field.lower() in variant_map_all.get(variant_key, {}):
+                   q_text = variant_map_all[variant_key][q_field.lower()]
+               elif isinstance(q_field, str) and q_field in answer_map:
+                   q_text = answer_map[q_field]
            else:
-               question_text = MAPPING_CONFIG.get("answer_key_to_question_variants", {}).get(variant_key, {}).get(key, "")
-           if question_text == "":
-               logging.warning("Question text for key '%s' (variant '%s') not found in mapping", key, variant_key)
-           questions_list.append(question_text)
+               if isinstance(q_field, str) and q_field in answer_map:
+                   q_text = answer_map[q_field]
+           if q_text is None:
+               q_text = str(q_field)
+           question_answer_list.append((q_text, ans_text))
+   elif "answers" in input_data:
+       # Input is a list of answers only (in order)
+       answers = input_data["answers"]
+       if not isinstance(answers, list):
+           raise HTTPException(status_code=400, detail="'answers' must be a list")
+       if len(answers) < 1:
+           raise HTTPException(status_code=400, detail="No answers provided")
+       pf_val = answers[0] if len(answers) > 0 else None
+       gender_val = answers[1] if len(answers) > 1 else None
+       variant_key = get_variant_key(pf_val, gender_val)
+       # Base questions: purchase_for and gender
+       if pf_val is not None:
+           q_text = answer_map.get("purchase_for", "Who are you purchasing for?")
+           question_answer_list.append((q_text, pf_val))
+       if gender_val is not None:
+           q_text = answer_map.get("gender", "Gender")
+           question_answer_list.append((q_text, gender_val))
+       # Variant-specific questions
+       if variant_key and variant_key in variant_map_all:
+           variant_questions = variant_map_all[variant_key]
+           # Assign remaining answers in order to each variant question
+           for i, (q_key, q_text) in enumerate(variant_questions.items(), start=2):
+               ans_text = answers[i] if i < len(answers) else ""
+               question_answer_list.append((q_text, ans_text))
+       else:
+           # If variant not determined, append remaining answers with generic labels
+           for i, ans_text in enumerate(answers[2:], start=3):
+               question_answer_list.append((f"Question{i}", ans_text))
    else:
-       logging.error("No answers provided in input")
-       raise HTTPException(status_code=400, detail="No answers provided")
-   # Pair up questions and answers into a list of dicts
-   qa_pairs = []
-   for q, a in zip(questions_list, answers_list):
-       qa_pairs.append({"question": str(q), "answer": str(a)})
-   # Construct XML string
-   xml_header = '<?xml version="1.0" encoding="utf-8"?>\n'
-   xml_body = "<root>\n"
-   xml_body += f"  <full_name>{output_fields.get('full_name', '')}</full_name>\n"
-   xml_body += f"  <email>{output_fields.get('email', '')}</email>\n"
-   xml_body += f"  <phone_number>{output_fields.get('phone_number', '')}</phone_number>\n"
-   # Use birth_date tag (if mapping used birthdate key, prefer that or birth_date)
-   birth_val = output_fields.get('birth_date') if 'birth_date' in output_fields else output_fields.get('birthdate', '')
-   xml_body += f"  <birth_date>{birth_val}</birth_date>\n"
-   xml_body += f"  <result_key>{output_fields.get('result_key', '')}</result_key>\n"
-   # Serialize questionAnswers list as JSON string and escape special XML characters
-   qa_json = json.dumps(qa_pairs)
-   qa_xml_text = qa_json.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-   xml_body += f"  <questionAnswers>{qa_xml_text}</questionAnswers>\n"
-   xml_body += "</root>"
-   xml_content = xml_header + xml_body
-   # Send XML to backend
+       # Input fields directly contain question keys and answers
+       pf_val = input_data.get("purchase_for")
+       gender_val = input_data.get("gender")
+       variant_key = get_variant_key(pf_val, gender_val)
+       if pf_val is not None:
+           q_text = answer_map.get("purchase_for", "Who are you purchasing for?")
+           question_answer_list.append((q_text, pf_val))
+       if gender_val is not None:
+           q_text = answer_map.get("gender", "Gender")
+           question_answer_list.append((q_text, gender_val))
+       if variant_key and variant_key in variant_map_all:
+           for q_key, q_text in variant_map_all[variant_key].items():
+               ans_val = input_data.get(q_key, "")
+               question_answer_list.append((q_text, ans_val))
+       else:
+           # Include any other known question fields present in input
+           for key, ans_val in input_data.items():
+               if key in ["purchase_for", "gender"]:
+                   continue
+               if key in answer_map:
+                   question_answer_list.append((answer_map[key], ans_val))
+               else:
+                   for v_map in variant_map_all.values():
+                       if key in v_map:
+                           question_answer_list.append((v_map[key], ans_val))
+                           break
+   # Construct XML structure
+   root = ET.Element("Request")
+   ET.SubElement(root, "request_id").text = metadata.get("request_id", "")
+   ET.SubElement(root, "full_name").text = metadata.get("full_name", "")
+   ET.SubElement(root, "email").text = metadata.get("email", "")
+   ET.SubElement(root, "phone_number").text = metadata.get("phone_number", "")
+   ET.SubElement(root, "birth_date").text = metadata.get("birth_date", "")
+   for q_text, ans_text in question_answer_list:
+       qa_elem = ET.SubElement(root, "questionAnswers")
+       ET.SubElement(qa_elem, "question").text = str(q_text) if q_text is not None else ""
+       ET.SubElement(qa_elem, "answer").text = str(ans_text) if ans_text is not None else ""
+   # Convert to string with XML declaration
+   xml_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+   xml_str = xml_bytes.decode("utf-8").strip()
+   if not xml_str.startswith("<?xml"):
+       xml_str = '<?xml version="1.0" encoding="utf-8"?>' + xml_str
+   # Post XML to backend /createRequest endpoint
+   backend_url = "https://backend.example.com/createRequest"  # Replace with actual backend URL
    try:
-       response = requests.post(f"{BACKEND_URL}/createRequest", data=xml_content, headers={"Content-Type": "application/xml"})
+       async with httpx.AsyncClient() as client:
+           resp = await client.post(backend_url, content=xml_str, headers={"Content-Type": "application/xml"})
    except Exception as e:
-       logging.error("Error sending request to backend: %s", e)
-       raise HTTPException(status_code=502, detail="Failed to send data to backend")
-   if response.status_code >= 400:
-       logging.error("Backend responded with status %d: %s", response.status_code, response.text)
-       raise HTTPException(status_code=response.status_code, detail="Backend service error")
-   logging.info("XML forwarded to backend successfully, status %d", response.status_code)
-   return JSONResponse(content={"message": "Request ingested successfully"}, status_code=200)
+       raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
+   # Return backend status and response body
+   return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("Content-Type") or "text/plain")
