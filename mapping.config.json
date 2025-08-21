@@ -1,88 +1,168 @@
 {
-  "field_map": {
-    "name": "name",
-    "full_name": "name",
-    "email": "email",
-    "phone": "phoneNumber",
-    "phone_number": "phoneNumber",
-    "phonenumber": "phoneNumber",
-    "birth_date": "birth_date",
-    "birthdate": "birth_date",
-    "date": "birth_date",
-    "dob": "birth_date",
-    "request_id": "request_id",
-    "result_key": "request_id",
-    "resultkey": "request_id",
-    "response_id": "request_id"
-  },
-  "result_key_field_candidates": [
-    "request_id",
-    "result_key",
-    "resultkey",
-    "response_id"
-  ],
-  "defaults": {
-    "name": "",
-    "email": "",
-    "phoneNumber": "",
-    "birth_date": ""
-  },
-  "answer_key_to_question": {
-    "purchase_for": "Who are you purchasing for?",
-    "gender": "Gender"
-  },
-  "answer_key_to_question_variants": {
-    "self": {
-      "profession": "Which Category Does Your Profession Fall In?",
-      "occasion": "Occasion",
-      "purpose": "Purpose",
-      "day": "How would you describe your typical day?",
-      "weekend": "How Do You Prefer To Spend Your Weekends?",
-      "work_dress": "How Do You Typically Dress For Work?",
-      "social_dress": "How Do You Typically Dress For Social Events?",
-      "line": "You Are Waiting In A Long Line",
-      "painting": "Whenever You See A Painting",
-      "word": "Choose A Word That Describes You Better",
-      "plan": "I Usually Like To"
+
+    "field_map": {
+
+        "name": "full_name",
+
+        "email": "email",
+
+        "phone": "phone_number",
+
+        "birth_date": "birthdate",
+
+        "request_id": "result_key"
+
     },
-    "others_female": {
-      "profession": "Which Category Does Her Profession Fall In?",
-      "occasion": "Occasion",
-      "purpose": "Purpose",
-      "day": "How would you describe her typical day?",
-      "weekend": "How Does She Prefer To Spend Her Weekends?",
-      "work_dress": "How Does She Typically Dress For Work?",
-      "social_dress": "How Does She Typically Dress For Social Events?",
-      "line": "She Is Waiting In A Long Line",
-      "painting": "Whenever She Sees A Painting",
-      "word": "Choose A Word That Describes Her Better",
-      "plan": "She Usually Likes To"
+
+    "result_key_field_candidates": [
+
+        "request_id",
+
+        "result_key"
+
+    ],
+
+    "defaults": {
+
+        "full_name": "",
+
+        "email": "",
+
+        "phone_number": "",
+
+        "birthdate": ""
+
     },
-    "others_male": {
-      "profession": "Which Category Does His Profession Fall In?",
-      "occasion": "Occasion",
-      "purpose": "Purpose",
-      "day": "How would you describe his typical day?",
-      "weekend": "How Does He Prefer To Spend His Weekends?",
-      "work_dress": "How Does He Typically Dress For Work?",
-      "social_dress": "How Does He Typically Dress For Social Events?",
-      "line": "He Is Waiting In A Long Line",
-      "painting": "Whenever He Sees A Painting",
-      "word": "Choose A Word That Describes Him Better",
-      "plan": "He Usually Likes To"
+
+    "answer_key_to_question": {
+
+        "purchase_for": "Who are you purchasing for?",
+
+        "gender": "Gender",
+
+        "relation": "Relation",
+
+        "profession": "Profession Category",
+
+        "occasion": "Occasion",
+
+        "purpose": "Purpose"
+
     },
-    "others": {
-      "profession": "Which Category Does Their Profession Fall In?",
-      "occasion": "Occasion",
-      "purpose": "Purpose",
-      "day": "How would you describe their typical day?",
-      "weekend": "How Do They Prefer To Spend Their Weekends?",
-      "work_dress": "How Do They Typically Dress For Work?",
-      "social_dress": "How Do They Typically Dress For Social Events?",
-      "line": "They Are Waiting In A Long Line",
-      "painting": "Whenever They See A Painting",
-      "word": "Choose A Word That Describes Them Better",
-      "plan": "They Usually Like To"
+
+    "answer_key_to_question_variants": {
+
+        "self": {
+
+            "profession": "Which Category Does Your Profession Fall In?",
+
+            "occasion": "Occasion",
+
+            "purpose": "Purpose",
+
+            "day": "How would you describe your typical day?",
+
+            "weekend": "How Do You Prefer To Spend Your Weekends?",
+
+            "work_dress": "How Do You Typically Dress For Work?",
+
+            "social_dress": "How Do You Typically Dress For Social Events?",
+
+            "line": "You Are Waiting In A Long Line",
+
+            "painting": "Whenever You See A Painting",
+
+            "word": "Choose A Word That Describes You Better",
+
+            "plan": "I Usually Like To"
+
+        },
+
+        "others_female": {
+
+            "relation": "Relation",
+
+            "profession": "Which Category Does Her Profession Fall In?",
+
+            "occasion": "Occasion",
+
+            "purpose": "Purpose",
+
+            "day": "How would you describe her typical day?",
+
+            "weekend": "How Does She Prefer To Spend Her Weekends?",
+
+            "work_dress": "How Does She Typically Dress For Work?",
+
+            "social_dress": "How Does She Typically Dress For Social Events?",
+
+            "line": "She Is Waiting In A Long Line",
+
+            "painting": "Whenever She Sees A Painting",
+
+            "word": "Choose A Word That Describes Her Better",
+
+            "plan": "She Usually Likes To"
+
+        },
+
+        "others_male": {
+
+            "relation": "Relation",
+
+            "profession": "Which Category Does His Profession Fall In?",
+
+            "occasion": "Occasion",
+
+            "purpose": "Purpose",
+
+            "day": "How would you describe his typical day?",
+
+            "weekend": "How Does He Prefer To Spend His Weekends?",
+
+            "work_dress": "How Does He Typically Dress For Work?",
+
+            "social_dress": "How Does He Typically Dress For Social Events?",
+
+            "line": "He Is Waiting In A Long Line",
+
+            "painting": "Whenever He Sees A Painting",
+
+            "word": "Choose A Word That Describes Him Better",
+
+            "plan": "He Usually Likes To"
+
+        },
+
+        "others": {
+
+            "relation": "Relation",
+
+            "profession": "Which Category Does Their Profession Fall In?",
+
+            "occasion": "Occasion",
+
+            "purpose": "Purpose",
+
+            "day": "How would you describe their typical day?",
+
+            "weekend": "How Do They Prefer To Spend Their Weekends?",
+
+            "work_dress": "How Do They Typically Dress For Work?",
+
+            "social_dress": "How Do They Typically Dress For Social Events?",
+
+            "line": "They Are Waiting In A Long Line",
+
+            "painting": "Whenever They See A Painting",
+
+            "word": "Choose A Word That Describes Them Better",
+
+            "plan": "They Usually Like To"
+
+        }
+
     }
-  }
+
 }
+ 
