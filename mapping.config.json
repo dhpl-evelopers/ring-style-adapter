@@ -1,23 +1,21 @@
 {
- "xml_root": "Request",
+ "xml_root": "request",
  "field_map": {
-   "full_name": "FullName",
-   "email": "Email",
-   "phone_number": "PhoneNumber",
-   "birth_date": "BirthDate",
-   "request_id": "RequestID",
-   "result_key": "RequestID"
+   "full_name": "name",
+   "email": "email",
+   "phone_number": "phoneNumber",
+   "birth_date": "birth_date"
  },
  "answer_key_to_question": {
-   "who": "Who are you?",
-   "gender": "Gender",
-   "occasion": "Occasion",
-   "purpose": "Purpose"
+   "who": "Q1. Who are you…?",
+   "gender": "Q2. Gender",
+   "occasion": "Q3. Occasion",
+   "purpose": "Q4. Purpose"
  },
  "defaults": {
-   "FullName": "",
-   "Email": "",
-   "PhoneNumber": "",
-   "BirthDate": ""
+   "name": "",
+   "email": "",
+   "phoneNumber": "",
+   "birth_date": ""
  }
 }
