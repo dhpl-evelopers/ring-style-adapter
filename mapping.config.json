@@ -18,7 +18,7 @@
    "70961": { "Creative: Interior Designer/...": 299527, "Other": 299528 },
    "70962": { "Wedding": 299537, "Formal event": 299538 },
    "70969": { "Daily wear": 299566, "Professional": 299567 },
-   /* include other questions similarly */
+
  },
  "questionOrder": [70955, 70956, 70961, 70962, 70969, 70766, 70765, 70767, 70768, 70970, 70971],
  "defaults": {
