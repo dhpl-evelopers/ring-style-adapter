@@ -1,202 +1,24 @@
 {
-
-  "forward": {
-
-    "timeout_sec": 30,
-
-    "headers": { "Accept": "application/json" }
-
-  },
-
-  "mapping": {
-
-    "source_root": null,
-
-    "identity": {
-
-      "full_name":   { "from": "name",         "required": true },
-
-      "email":       { "from": "email",        "required": true },
-
-      "phone_number":{"from": "phone_number",  "required": true },
-
-      "birth_date":  { "from": "birth_date",   "required": true },
-
-      "request_id":  { "from": "request_id",   "required": true },
-
-      "result_key":  { "from": "result_key",   "required": true }
-
-    },
-
-    "answers_path": "questionAnswers",
-
-    "id_key":       "id",
-
-    "text_key":     "question",
-
-    "value_key":    "answer",
-
-    "questions": {
-
-      "Q1":  {
-
-        "key": "who",
-
-        "text": "Who are you purchasing for?",
-
-        "options": ["Self", "Gift"]
-
-      },
-
-      "Q2":  {
-
-        "key": "gender",
-
-        "text": "Gender",
-
-        "options": ["Male", "Female", "Other"]
-
-      },
-
-      "Q3":  {
-
-        "key": "profession",
-
-        "text": "Profession",
-
-        "options": [
-
-          "Skill Based/Manual: Home-maker",
-
-          "Baker",
-
-          "Make-up Artist",
-
-          "Graphics & VFX",
-
-          "Photographer",
-
-          "Designer",
-
-          "Business Professional",
-
-          "Other"
-
-        ]
-
-      },
-
-      "Q4":  {
-
-        "key": "occasion",
-
-        "text": "Occasion",
-
-        "options": ["Wedding", "Anniversary", "Daily wear", "Special Occasion"]
-
-      },
-
-      "Q5":  {
-
-        "key": "purpose",
-
-        "text": "Purpose",
-
-        "options": ["Work", "Daily wear", "Party wear"]
-
-      },
-
-      "Q6":  {
-
-        "key": "day_type",
-
-        "text": "How would you describe your typical day?",
-
-        "options": ["On the move", "Routine", "Spontaneous & Free Spirited"]
-
-      },
-
-      "Q7":  {
-
-        "key": "weekend",
-
-        "text": "How do you prefer to spend your weekends?",
-
-        "options": ["Going out & socializing", "Relaxing at home", "Traveling"]
-
-      },
-
-      "Q8":  {
-
-        "key": "work_dress",
-
-        "text": "How do you typically dress for work?",
-
-        "options": ["Business Formals", "Smart Casuals", "Creative Attire"]
-
-      },
-
-      "Q9":  {
-
-        "key": "social_dress",
-
-        "text": "How do you typically dress for social events?",
-
-        "options": ["Stylish & Chic", "Minimalist", "Traditional", "Trendy"]
-
-      },
-
-      "Q10": {
-
-        "key": "long_line",
-
-        "text": "You are waiting in a long line",
-
-        "options": ["Talk to people", "Scroll phone", "Stay quiet"]
-
-      },
-
-      "Q11": {
-
-        "key": "painting_view",
-
-        "text": "Whenever you see a painting",
-
-        "options": ["Artistic detailing", "Colors", "Overall feel"]
-
-      },
-
-      "Q12": {
-
-        "key": "mother_unwell",
-
-        "text": "Your mother is not feeling well & you have an important meeting?",
-
-        "options": ["Reschedule meeting", "Attend meeting", "Balance both"]
-
-      },
-
-      "Q13": {
-
-        "key": "last_minute",
-
-        "text": "Last minute plans",
-
-        "options": ["Go with the flow", "Decline politely", "Plan ahead"]
-
-      }
-
-    }
-
-  },
-
-  "response": {
-
-    "type": "json",
-
-    "xml_root": "BackendResponse"
-
-  }
-
+ "forward": {
+   "timeout_sec": 30,
+   "headers": { "Accept": "application/json" }
+ },
+ "mapping": {
+   "identity": {
+     "full_name":   { "from": "name",         "required": true },
+     "email":       { "from": "email",        "required": true },
+     "phone_number":{"from": "phone_number",  "required": true },
+     "birth_date":  { "from": "birth_date",   "required": true },
+     "request_id":  { "from": "request_id",   "required": true },
+     "result_key":  { "from": "result_key",   "required": true }
+   },
+   "answers_path": "questionAnswers",
+   "id_key": "id",
+   "text_key": "question",
+   "value_key": "answer",
+   "questions": {
+     "Q1": { "key": "who", "text": "Who are you purchasing for?", "options": ["Self", "Gift"] },
+     "Q2": { "key": "gender", "text": "Gender", "options": ["Male", "Female", "Other"] }
+   }
+ }
 }
- 
