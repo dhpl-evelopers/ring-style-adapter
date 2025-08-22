@@ -1,37 +1,17 @@
-{
- "forward": {
-   "timeout_sec": 30,
-   "headers": {
-     "Accept": "application/json"
-   }
- },
- "mapping": {
-   "source_root": null,
-   "contact": {
-     "name": "full_name",
-     "email": "email",
-     "phone_number": "phone_number",
-     "birth_date": "birth_date",
-     "request_id": "request_id"
-   },
-   "answers_path": "questionAnswers",
-   "questions": [
-     { "key": "q1_style",   "text": "Who are you purchasing for?" },
-     { "key": "q2_metal",   "text": "Gender" },
-     { "key": "q3_budget",  "text": "Profession" },
-     { "key": "q4_size",    "text": "Purpose" },
-     { "key": "q5_profile", "text": "How would you describe your typical day?" },
-     { "key": "q6_social",  "text": "How do you prefer to spend your weekends?" },
-     { "key": "q7_work",    "text": "How do you typically dress for work?" },
-     { "key": "q8_events",  "text": "How do you typically dress for social events?" },
-     { "key": "q9_style",   "text": "Do you prefer trendy or classic looks?" },
-     { "key": "q10_look",   "text": "Do you like minimal or bold looks?" },
-     { "key": "q11_size",   "text": "Are you a long time fan of rings?" },
-     { "key": "q12_habit",  "text": "Do you wear a ring while painting?" }
-   ]
- },
- "response": {
-   "type": "json",
-   "xml_root": "BackendResponse"
- }
-}
+[
+ { "key": "q1_style",      "text": "Who are you purchasing for?" },
+ { "key": "q2_gender",     "text": "Gender" },
+ { "key": "q3_profession", "text": "Profession" },
+ { "key": "q4_purpose",    "text": "Purpose" },
+ { "key": "q5_typical",    "text": "How would you describe your typical day?" },
+ { "key": "q6_weekend",    "text": "How do you prefer to spend your weekends?" },
+ { "key": "q7_work_dress", "text": "How do you typically dress for work?" },
+ { "key": "q8_social",     "text": "How do you typically dress for social events?" },
+ { "key": "q9_hobbies",    "text": "Hobbies" },
+ { "key": "q10_persona",   "text": "How would you describe your style?" },
+ { "key": "q11_color",     "text": "Favorite colour" },
+ { "key": "q12_metal",     "text": "Preferred metal" },
+ { "key": "q13_budget",    "text": "Budget" },
+ { "key": "q14_size",      "text": "Ring size" },
+ { "key": "q15_profile",   "text": "Profile" }
+]
