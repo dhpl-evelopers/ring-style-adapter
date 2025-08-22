@@ -1,358 +1,469 @@
+# app.py
+
+# v2.1 — Ring Style Adapter (FastAPI)
+
 import os
+
 import json
-from fastapi import FastAPI, Request
-import uvicorn
-import xmltodict
-from dicttoxml import dicttoxml
-import os, json, logging, uuid, hashlib
-from typing import Any, Dict, List, Optional, Tuple
+
+import uuid
+
+import logging
+
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
-from fastapi import FastAPI, Request, HTTPException, Body
-from fastapi.responses import PlainTextResponse
 
-# ---------------- Logging ----------------
-log = logging.getLogger("adapter")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+from fastapi import FastAPI, Request, HTTPException
 
-# ---------------- FastAPI ----------------
-app = FastAPI(title="Ring Style Adapter", version="2.0.0")
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-# ---------------- Environment ----------------
-# Set these in Azure App Service > Configuration
-BACKEND_POST_URL = os.getenv("BACKEND_POST_URL", "").strip()   # e.g. https://<your-backend>/createRequest
-API_KEY_REQUIRED = os.getenv("API_KEY_REQUIRED", "false").lower() == "true"
-API_KEY          = os.getenv("API_KEY", "")
+from fastapi.middleware.cors import CORSMiddleware
 
-# ---------------- Load mapping.config.json ----------------
-from pathlib import Path
-import sys
-import logging, json
-log = logging.getLogger("adapter")
-CFG_PATH = Path(__file__).parent / "mapping.config.json"
 try:
-   with CFG_PATH.open("r", encoding="utf-8") as f:
-       mapping = json.load(f)
-   log.info("Loaded mapping.json with %d keys", len(mapping))
-except FileNotFoundError:
-   log.error("mapping.config.json not found at %s", CFG_PATH)
-   sys.exit(1)
-except json.JSONDecodeError as e:
-   log.error("mapping.config.json invalid JSON: %s", e)
-   sys.exit(1)
 
-# Canonical XML root expected by backend
-XML_ROOT = CFG.get("xml_root", "data")
+    import xmltodict
 
-# Flexible field aliases the UI might send -> canonical keys for the backend XML
-FIELD_ALIASES: Dict[str, str] = {k.lower(): v for k, v in CFG.get("field_map", {}).items()}
+    from dicttoxml import dicttoxml
 
-# Default values if UI omits them
-DEFAULTS: Dict[str, Any] = CFG.get("defaults", {})
+except Exception:  # pragma: no cover
 
-# Optional static mapping for short answer keys -> full question text
-# (You said “Yes” to generating ids, so questions can be free-form; this is only used if provided)
-ANSWER_KEY_TO_QUESTION: Dict[str, str] = CFG.get("answer_key_to_question", {})
+    xmltodict = None
 
-# ---------------- Helpers ----------------
-def _require_backend():
-    if not BACKEND_POST_URL:
-        raise HTTPException(status_code=500, detail="BACKEND_POST_URL not configured")
+    dicttoxml = None
 
-def _check_api_key(req: Request):
-    if not API_KEY_REQUIRED:
-        return
-    if not API_KEY or req.headers.get("x-api-key") != API_KEY:
-        raise HTTPException(status_code=401, detail="unauthorized")
 
-def _norm_phone(v: str) -> str:
-    if not isinstance(v, str):
-        return str(v or "")
-    return v.strip()
+# -----------------------------
 
-def _norm_date(v: str) -> str:
-    # Pass-through; your backend accepts both dd/mm/yyyy and yyyy-mm-dd based on earlier logs.
-    return (v or "").strip()
+# Logging
 
-def _canon_key(k: str) -> str:
-    lk = (k or "").strip().lower()
-    return FIELD_ALIASES.get(lk, lk)
+# -----------------------------
 
-def _gather_identity(raw: Dict[str, Any]) -> Dict[str, Any]:
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+logging.basicConfig(
+
+    level=LOG_LEVEL,
+
+    format="%(asctime)s [%(levelname)s] %(message)s",
+
+)
+
+log = logging.getLogger("adapter")
+
+
+# -----------------------------
+
+# Environment / Config
+
+# -----------------------------
+
+app = FastAPI(title="Ring Style Adapter", version="2.1.0")
+
+# Allow CORS if you need it (safe defaults)
+
+app.add_middleware(
+
+    CORSMiddleware,
+
+    allow_origins=os.getenv("CORS_ALLOW_ORIGINS", "*").split(","),
+
+    allow_credentials=True,
+
+    allow_methods=["*"],
+
+    allow_headers=["*"],
+
+)
+
+# Mandatory/optional env vars
+
+BACKEND_POST_URL = os.getenv("BACKEND_POST_URL", "").strip()  # your backend endpoint
+
+API_KEY_REQUIRED = os.getenv("API_KEY_REQUIRED", "false").lower() == "true"
+
+API_KEY_HEADER = os.getenv("API_KEY_HEADER", "x-api-key")
+
+API_KEY_VALUE = os.getenv("API_KEY", "")
+
+REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "30"))
+
+# --- mapping.config.json absolute path (critical fix) ---
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+CFG_PATH = os.path.join(BASE_DIR, "mapping.config.json")
+
+# --------------------------------------------------------
+
+
+# -----------------------------
+
+# Helpers
+
+# -----------------------------
+
+def _read_mapping() -> Dict[str, Any]:
+
     """
-    Pull name, email, phone, birth_date, result_key, quizId, id, etc. from any flexible shape.
+
+    Load mapping.config.json if present.
+
+    Expected shape (example):
+
+    {
+
+      "in_to_backend": { "ring.fieldA": "backend.fieldOne", "ring.user.id": "backend.customerId" },
+
+      "backend_to_out": { "backend.orderId": "out.order_id" },
+
+      "static_backend": { "source": "ring-adapter" }  # always added to backend payload
+
+    }
+
     """
-    out = dict(DEFAULTS)
 
-    # flatten one level
-    def visit(prefix, node):
-        if isinstance(node, dict):
-            for kk, vv in node.items():
-                visit(f"{prefix}.{kk}" if prefix else kk, vv)
-        else:
-            out_key = _canon_key(prefix.split(".")[-1])
-            out[out_key] = vv_to_str(vv=node)
+    if not os.path.exists(CFG_PATH):
 
-    def vv_to_str(vv: Any) -> Any:
-        if vv is None:
-            return ""
-        return vv
+        log.warning("mapping.config.json not found at %s; using pass-through.", CFG_PATH)
 
-    visit("", raw)
+        return {
 
-    # Normalize common identity fields
-    if "phone_number" in out and not out.get("phoneNumber"):
-        out["phoneNumber"] = _norm_phone(out.pop("phone_number"))
-    if "dob" in out and not out.get("dateOfBirth"):
-        out["dateOfBirth"] = _norm_date(out.pop("dob"))
-    if "birth_date" in out and not out.get("dateOfBirth"):
-        out["dateOfBirth"] = _norm_date(out.pop("birth_date"))
-    if "fullName" not in out and "name" in out:
-        out["fullName"] = (out.get("name") or "").strip()
+            "in_to_backend": {},
 
-    # Ensure required keys exist (empty allowed – backend handles)
-    for k in ["id","quizId","fullName","email","phoneNumber","dateOfBirth","resultKey",
-              "termsConditions","website","organization","address1","address2","city",
-              "country","state","zipCode"]:
-        out.setdefault(k, "")
+            "backend_to_out": {},
 
-    # Make some sensible defaults if missing
-    if not out["id"]:
-        out["id"] = str(uuid.uuid4().int)[:6]  # short numeric-ish id
-    if not out["quizId"]:
-        out["quizId"] = "12952"  # fallback; adjust if you have a fixed quiz
-    if out["termsConditions"] in ("", None):
-        out["termsConditions"] = 0
+            "static_backend": {}
+
+        }
+
+    with open(CFG_PATH, "r", encoding="utf-8") as f:
+
+        try:
+
+            cfg = json.load(f)
+
+        except json.JSONDecodeError as e:
+
+            log.error("Invalid JSON in mapping.config.json: %s", e)
+
+            raise
+
+    # Normalize keys
+
+    return {
+
+        "in_to_backend": cfg.get("in_to_backend", {}),
+
+        "backend_to_out": cfg.get("backend_to_out", {}),
+
+        "static_backend": cfg.get("static_backend", {}),
+
+    }
+
+
+def _get_by_path(data: Dict[str, Any], path: str) -> Any:
+
+    cur = data
+
+    for part in path.split("."):
+
+        if not isinstance(cur, dict) or part not in cur:
+
+            return None
+
+        cur = cur[part]
+
+    return cur
+
+
+def _set_by_path(target: Dict[str, Any], path: str, value: Any) -> None:
+
+    cur = target
+
+    parts = path.split(".")
+
+    for p in parts[:-1]:
+
+        if p not in cur or not isinstance(cur[p], dict):
+
+            cur[p] = {}
+
+        cur = cur[p]
+
+    cur[parts[-1]] = value
+
+
+def map_payload(
+
+    payload: Dict[str, Any],
+
+    mapping: Dict[str, str],
+
+    static_items: Optional[Dict[str, Any]] = None
+
+) -> Dict[str, Any]:
+
+    """
+
+    Build a new dict by mapping dotted paths from source->dest.
+
+    """
+
+    out: Dict[str, Any] = {}
+
+    for src, dst in mapping.items():
+
+        val = _get_by_path(payload, src)
+
+        if val is not None:
+
+            _set_by_path(out, dst, val)
+
+    if static_items:
+
+        for k, v in static_items.items():
+
+            _set_by_path(out, k, v)
 
     return out
 
-def _mk_qid(question_text: str, base: int = 70000) -> int:
+
+def ensure_json_body(content_type: str, body_bytes: bytes) -> Tuple[Dict[str, Any], str]:
+
     """
-    Stable, deterministic questionId from question text.
-    You said “Yes” to generating ids; this will be consistent per text, no config required.
+
+    Accept JSON or XML. Return python dict + detected_format ("json"|"xml").
+
     """
-    h = hashlib.blake2b(question_text.encode("utf-8"), digest_size=4).hexdigest()
-    return base + (int(h, 16) % 10000)
 
-def _mk_option_id(answer_value: str, base: int = 290000) -> int:
-    """
-    Stable option id from answer value (deterministic).
-    """
-    h = hashlib.blake2b((answer_value or "").encode("utf-8"), digest_size=4).hexdigest()
-    return base + (int(h, 16) % 100000)
+    ct = (content_type or "").lower()
 
-def _from_answers_only(answers: List[Any], questions: Optional[List[str]]) -> List[Dict[str, Any]]:
-    """
-    Build questionAnswers from either:
-      - answers only + parallel 'questions' list (same length), or
-      - answers only (we fallback to pos-based generic labels Q1..., Q2...)
-    """
-    qa = []
-    for idx, ans in enumerate(answers):
-        if isinstance(ans, dict) and "question" in ans and "selectedOption" in ans:
-            # already QnA block
-            question = str(ans.get("question") or "").strip()
-            sel = ans.get("selectedOption") or {}
-            value = sel.get("value")
-            img = sel.get("image")
-        else:
-            # answers-only; infer question text
-            if questions and idx < len(questions):
-                qtxt = str(questions[idx] or "").strip()
-            else:
-                # try map via ANSWER_KEY_TO_QUESTION if ans is a short key
-                key = str(ans or "").strip().lower()
-                qtxt = ANSWER_KEY_TO_QUESTION.get(key, f"Q{idx+1}. (Auto)")
+    raw = body_bytes.decode("utf-8").strip() if body_bytes else ""
 
-            question = qtxt
-            value = ans
-            img = None
+    # Prefer JSON if content-type says JSON or if it looks like JSON
 
-        qid = _mk_qid(question)
-        opt_id = _mk_option_id(str(value or ""))
+    if "application/json" in ct or (raw.startswith("{") or raw.startswith("[")):
 
-        qa.append({
-            "question": question,
-            "questionId": qid,
-            "selectedOption": {
-                "id": opt_id,
-                "value": value,
-                "image": img
-            }
-        })
-    return qa
+        try:
 
-def _from_questionAnswers(questionAnswers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Normalize already well-formed 'questionAnswers' into the shape backend expects.
-    Auto-fill missing questionId/selectedOption.id deterministically.
-    """
-    qa = []
-    for item in questionAnswers:
-        q = str(item.get("question") or "").strip()
-        qid = item.get("questionId") or _mk_qid(q)
-        sel = item.get("selectedOption") or {}
-        val = sel.get("value")
-        img = sel.get("image")
-        opt_id = sel.get("id") or _mk_option_id(str(val or ""))
+            return json.loads(raw) if raw else {}, "json"
 
-        qa.append({
-            "question": q,
-            "questionId": int(qid),
-            "selectedOption": {
-                "id": int(opt_id),
-                "value": val,
-                "image": img
-            }
-        })
-    return qa
+        except json.JSONDecodeError as e:
 
-def _build_xml(identity: Dict[str, Any], questionAnswers: List[Dict[str, Any]]) -> str:
-    """
-    Build the exact XML your backend log stream shows (no dicttoxml; manual to control tags).
-    """
-    # Helper to escape basic XML
-    def esc(s: Any) -> str:
-        x = "" if s is None else str(s)
-        return (x.replace("&","&amp;")
-                 .replace("<","&lt;")
-                 .replace(">","&gt;")
-                 .replace('"',"&quot;")
-                 .replace("'","&apos;"))
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
 
-    # Identity block exactly like your backend expects (lowerCamelCase keys)
-    parts = []
-    parts.append(f"<{XML_ROOT}>")
-    parts.append(f"<id>{esc(identity.get('id'))}</id>")
-    parts.append(f"<quiz_id>{esc(identity.get('quizId'))}</quiz_id>")
-    parts.append(f"<full_name>{esc(identity.get('fullName'))}</full_name>")
-    parts.append(f"<email>{esc(identity.get('email'))}</email>")
-    parts.append(f"<phone_number>{esc(identity.get('phoneNumber'))}</phone_number>")
-    parts.append(f"<date>{esc(identity.get('dateOfBirth'))}</date>")
-    parts.append(f"<terms_conditions>{esc(identity.get('termsConditions'))}</terms_conditions>")
-    parts.append(f"<website>{esc(identity.get('website'))}</website>")
-    parts.append(f"<organisation>{esc(identity.get('organization'))}</organisation>")
-    parts.append(f"<address1>{esc(identity.get('address1'))}</address1>")
-    parts.append(f"<address2>{esc(identity.get('address2'))}</address2>")
-    parts.append(f"<city>{esc(identity.get('city'))}</city>")
-    parts.append(f"<country>{esc(identity.get('country'))}</country>")
-    parts.append(f"<state>{esc(identity.get('state'))}</state>")
-    parts.append(f"<zip_code>{esc(identity.get('zipCode'))}</zip_code>")
+    # Fallback: XML (if allowed)
 
-    # Result key (your backend treats as request_id)
-    parts.append(f"<result_key>{esc(identity.get('resultKey'))}</result_key>")
+    if ("application/xml" in ct or raw.startswith("<")) and xmltodict is not None:
 
-    # Empty arrays the backend tolerates
-    parts.append("<custom_inputs>[]</custom_inputs>")
-    parts.append("<products>[]</products>")
+        try:
 
-    # questionAnswers block — the backend logs show this as a stringified array; we’ll format it like that
-    qa_entries = []
-    for qa in questionAnswers:
-        q = esc(qa.get("question"))
-        qid = qa.get("questionId")
-        sel = qa.get("selectedOption") or {}
-        sid = sel.get("id")
-        sval = esc(sel.get("value"))
-        simg = esc(sel.get("image"))
-        qa_entries.append(
-            "{&apos;question&apos;: &apos;%s&apos;,&apos;questionId&apos;: %s,&apos;isMasterQuestion&apos;: false,"
-            "&apos;questionType&apos;: &apos;singleAnswer&apos;,"
-            "&apos;selectedOption&apos;: {&apos;id&apos;: %s,&apos;value&apos;: &apos;%s&apos;,&apos;image&apos;: &apos;%s&apos;}}"
-            % (q, int(qid), int(sid), sval, simg)
-        )
-    parts.append("<questionAnswers>[{}]</questionAnswers>".format(", ".join(qa_entries)))
+            return xmltodict.parse(raw) if raw else {}, "xml"
 
-    parts.append("</{0}>".format(XML_ROOT))
-    # Event wrapper you showed in logs often sits outside <data>, but backend accepts payload with just <data>.
-    return "".join(parts)
+        except Exception as e:  # xml parsing
 
-def _extract_qna(raw: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """
-    Accept these flexible shapes:
-      A) { "answers": [...], "questions": [...], <identity fields> }
-      B) { "questionAnswers": [ { question, questionId?, selectedOption{ id?, value, image? } } ], <identity fields> }
-      C) Flat key/value: { "gender":"Female", "purpose":"Daily wear", ... } + optional 'answer_key_to_question' mapping
-    Always returns (identity, questionAnswers[])
-    """
-    identity = _gather_identity(raw)
+            raise HTTPException(status_code=400, detail=f"Invalid XML: {e}") from e
 
-    # Case A
-    if isinstance(raw.get("answers"), list):
-        qa = _from_answers_only(raw["answers"], raw.get("questions"))
-        return identity, qa
+    # If xmltodict unavailable
 
-    # Case B
-    if isinstance(raw.get("questionAnswers"), list):
-        qa = _from_questionAnswers(raw["questionAnswers"])
-        return identity, qa
+    if "xml" in ct and xmltodict is None:
 
-    # Case C: dictionary of short keys -> answers
-    # Use mapping: answer_key_to_question; otherwise derive generic Qx text
-    if raw:
-        items = []
-        for idx, (k, v) in enumerate(raw.items()):
-            if k in ("answers","questions","questionAnswers"):
-                continue
-            if isinstance(v, (dict, list)):
-                continue
-            qtxt = ANSWER_KEY_TO_QUESTION.get(str(k).lower(), f"Q{idx+1}. {str(k)}")
-            items.append(v)
-        qa = _from_answers_only(items, None)
-        return identity, qa
+        raise HTTPException(status_code=415, detail="XML support not installed on server.")
 
-    # fallback
-    return identity, []
+    # Nothing recognized
 
-# ---------------- Routes ----------------
+    raise HTTPException(status_code=415, detail="Unsupported Content-Type. Use application/json or application/xml.")
+
+
+def to_xml(data: Dict[str, Any]) -> bytes:
+
+    if dicttoxml is None:
+
+        raise HTTPException(status_code=500, detail="XML response requested but XML library not installed.")
+
+    # dicttoxml returns bytes already
+
+    return dicttoxml(data, custom_root="response", attr_type=False)
+
+
+# -----------------------------
+
+# Startup: load mapping once
+
+# -----------------------------
+
+MAPPING = _read_mapping()
+
+log.info("Adapter ready. Mapping loaded from %s", CFG_PATH)
+
+
+# -----------------------------
+
+# Routes
+
+# -----------------------------
 
 @app.get("/", response_class=PlainTextResponse)
-async def root():
-    return "Ring Style Adapter is up"
 
-@app.post("/ingest")  # Flexible UI entry — ALWAYS posts to backend
-async def ingest(raw: dict = Body(...), req: Request = None):
-    _check_api_key(req)
-    _require_backend()
+async def root() -> str:
 
-    log.info("Inbound raw: %s", json.dumps(raw, ensure_ascii=False)[:2000])
+    return "Ring Style Adapter OK"
 
-    identity, qas = _extract_qna(raw)
-    if not identity.get("resultKey"):
-        # Generate a resultKey if UI didn’t send it
-        identity["resultKey"] = f"{uuid.uuid4()}_ms"
 
-    xml_payload = _build_xml(identity, qas)
-    log.info("XML to backend (first 2KB): %s", xml_payload[:2000])
+@app.get("/ping", response_class=JSONResponse)
 
-    # Always call backend /createRequest (XML)
-    headers = {"Content-Type": "application/xml"}
-    if API_KEY_REQUIRED and API_KEY:
-        headers["x-api-key"] = API_KEY
+async def ping() -> Dict[str, Any]:
+
+    return {"status": "ok", "version": app.version, "request_id": str(uuid.uuid4())}
+
+
+@app.post("/adapter")
+
+async def adapter(request: Request) -> Response:
+
+    """
+
+    Entry point for Ring/Phygital webhook.
+
+    1) Accept JSON or XML.
+
+    2) Map to backend schema using mapping.config.json.
+
+    3) POST to BACKEND_POST_URL with optional API key header.
+
+    4) Map backend response back to outward schema (if configured).
+
+    5) Mirror client Accept header (json default).
+
+    """
+
+    if not BACKEND_POST_URL:
+
+        raise HTTPException(status_code=500, detail="BACKEND_POST_URL is not configured.")
+
+    # 1) Parse inbound body
+
+    body_bytes = await request.body()
+
+    src_payload, src_format = ensure_json_body(request.headers.get("content-type", ""), body_bytes)
+
+    log.debug("Inbound format=%s payload=%s", src_format, src_payload)
+
+    # If XML was posted, xmltodict returns a nested dict with a single root. That’s fine.
+
+    # 2) Map to backend schema
+
+    to_backend = map_payload(
+
+        src_payload,
+
+        MAPPING.get("in_to_backend", {}),
+
+        MAPPING.get("static_backend", {}),
+
+    )
+
+    # If no mapping, default to pass-through
+
+    backend_payload = to_backend or src_payload
+
+    # 3) Call backend
+
+    headers = {"content-type": "application/json"}
+
+    if API_KEY_REQUIRED:
+
+        if not API_KEY_VALUE:
+
+            raise HTTPException(status_code=500, detail="API key required but API_KEY is not set.")
+
+        headers[API_KEY_HEADER] = API_KEY_VALUE
+
+    request_id = str(uuid.uuid4())
+
+    headers["x-request-id"] = request_id
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(BACKEND_POST_URL, content=xml_payload.encode("utf-8"), headers=headers)
-        log.info("Backend status: %s", resp.status_code)
-        text = resp.text
-        log.info("Backend body (first 2KB): %s", text[:2000])
 
-        # If backend throws, surface it so you see it in Swagger/Postman
-        if resp.status_code >= 400:
-            raise HTTPException(status_code=resp.status_code, detail={"backend_error": text})
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, verify=True) as client:
 
-        # Success: give you identity/resultKey and backend echo
-        return {
-            "ok": True,
-            "result_key": identity["resultKey"],
-            "forwarded_to": BACKEND_POST_URL,
-            "backend_status": resp.status_code,
-            "backend_body": text
-        }
+            resp = await client.post(BACKEND_POST_URL, json=backend_payload, headers=headers)
 
-    except httpx.RequestError as e:
-        log.exception("Network error calling backend")
-        raise HTTPException(status_code=502, detail=f"Network error calling backend: {e}") from e
-    except Exception as e:
-        log.exception("Unhandled error")
-        raise HTTPException(status_code=500, detail=f"Adapter error: {e}") from e
+    except httpx.TimeoutException:
+
+        log.exception("Backend timeout (%ss)", REQUEST_TIMEOUT)
+
+        raise HTTPException(status_code=504, detail="Backend timeout.")
+
+    except httpx.HTTPError as e:
+
+        log.exception("Backend HTTP error")
+
+        raise HTTPException(status_code=502, detail=f"Backend error: {e!s}") from e
+
+    # 4) Map backend response
+
+    try:
+
+        backend_json: Dict[str, Any] = resp.json()
+
+    except ValueError:
+
+        # Not JSON? return raw text as-is
+
+        backend_text = resp.text
+
+        # Echo text (don’t attempt mapping)
+
+        return PlainTextResponse(
+
+            content=backend_text,
+
+            status_code=resp.status_code,
+
+            headers={"x-request-id": request_id},
+
+        )
+
+    mapped_out = map_payload(backend_json, MAPPING.get("backend_to_out", {}))
+
+    outward = mapped_out or backend_json
+
+    # 5) Negotiate response type: default JSON; use XML if client explicitly prefers it
+
+    accept = (request.headers.get("accept") or "").lower()
+
+    if "application/xml" in accept:
+
+        xml_bytes = to_xml(outward)
+
+        return Response(content=xml_bytes, media_type="application/xml", status_code=resp.status_code, headers={"x-request-id": request_id})
+
+    return JSONResponse(content=outward, status_code=resp.status_code, headers={"x-request-id": request_id})
+
+
+# -----------------------------
+
+# Local dev (optional)
+
+# -----------------------------
+
+if __name__ == "__main__":
+
+    import uvicorn
+
+    uvicorn.run(
+
+        "app:app",
+
+        host=os.getenv("HOST", "0.0.0.0"),
+
+        port=int(os.getenv("PORT", "8000")),
+
+        log_level=LOG_LEVEL.lower(),
+
+        reload=bool(os.getenv("RELOAD", "0") == "1"),
+
+    )
+ 
