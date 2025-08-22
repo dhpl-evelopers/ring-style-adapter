@@ -1,24 +1,34 @@
 {
- "forward": {
-   "timeout_sec": 30,
-   "headers": { "Accept": "application/json" }
- },
- "mapping": {
-   "identity": {
-     "full_name":   { "from": "name",         "required": true },
-     "email":       { "from": "email",        "required": true },
-     "phone_number":{"from": "phone_number",  "required": true },
-     "birth_date":  { "from": "birth_date",   "required": true },
-     "request_id":  { "from": "request_id",   "required": true },
-     "result_key":  { "from": "result_key",   "required": true }
-   },
-   "answers_path": "questionAnswers",
-   "id_key": "id",
-   "text_key": "question",
-   "value_key": "answer",
-   "questions": {
-     "Q1": { "key": "who", "text": "Who are you purchasing for?", "options": ["Self", "Gift"] },
-     "Q2": { "key": "gender", "text": "Gender", "options": ["Male", "Female", "Other"] }
-   }
- }
+
+  "mappings": {
+
+    "Q1": "Who are you purchasing for?",
+
+    "Q2": "Gender",
+
+    "Q3": "Profession",
+
+    "Q4": "Occasion",
+
+    "Q5": "Purpose",
+
+    "Q6": "How would you describe your typical day?",
+
+    "Q7": "How do you prefer to spend your weekends?",
+
+    "Q8": "How do you typically dress for work?",
+
+    "Q9": "How do you typically dress for social events?",
+
+    "Q10": "You are waiting in a long line, what do you do?",
+
+    "Q11": "Whenever you see a painting, what do you imagine yourself as?",
+
+    "Q12": "Your mother is not feeling well & you have an important meeting to drive, what will you do?",
+
+    "Q13": "Last minute plans, how do you respond?"
+
+  }
+
 }
+ 
