@@ -1,67 +1,37 @@
 {
- "xml_root": "data",
- "defaults": {
-   "id": "",
-   "quizId": "12952",
-   "fullName": "",
-   "email": "",
-   "phoneNumber": "",
-   "dateOfBirth": "",
-   "resultKey": "",
-   "termsConditions": 0,
-   "website": "",
-   "organization": "",
-   "address1": "",
-   "address2": "",
-   "city": "",
-   "country": "",
-   "state": "",
-   "zipCode": ""
+ "forward": {
+   "timeout_sec": 30,
+   "headers": {
+     "Accept": "application/json"
+   }
  },
- "field_map": {
-   "id": "id",
-   "quizid": "quizId",
-   "quiz_id": "quizId",
-   "name": "fullName",
-   "fullname": "fullName",
-   "full_name": "fullName",
-   "email": "email",
-   "phone": "phoneNumber",
-   "phonenumber": "phoneNumber",
-   "phone_number": "phoneNumber",
-   "mobile": "phoneNumber",
-   "mobile_number": "phoneNumber",
-   "dob": "dateOfBirth",
-   "birthdate": "dateOfBirth",
-   "birth_date": "dateOfBirth",
-   "dateofbirth": "dateOfBirth",
-   "date": "dateOfBirth",
-   "resultkey": "resultKey",
-   "result_key": "resultKey",
-   "user_id": "resultKey",
-   "userid": "resultKey",
-   "request_id": "resultKey",
-   "response_id": "resultKey",
-   "terms": "termsConditions",
-   "termsconditions": "termsConditions",
-   "terms_conditions": "termsConditions",
-   "organisation": "organization",
-   "organization": "organization",
-   "address1": "address1",
-   "address2": "address2",
-   "city": "city",
-   "country": "country",
-   "state": "state",
-   "zipcode": "zipCode",
-   "zip": "zipCode",
-   "zip_code": "zipCode",
-   "website": "website"
+ "mapping": {
+   "source_root": null,
+   "answers_path": "answers",
+   "answer_id_key": "id",
+   "answer_value_key": "value",
+   "fields": {
+     "customer_name": { "from": "customer.name" },
+     "mobile":        { "from": "customer.mobile" },
+     "session_id":    { "from": "sessionId" },
+     "style":         { "from": "answers.q1_style" },
+     "metal":         { "from": "answers.q2_metal", "transform": "lower" },
+     "budget":        { "from": "answers.q3_budget", "transform": "int" },
+     "ring_size":     { "from": "answers.q4_size" },
+     "profile":       { "from": "answers.q5_profile" },
+     "notes":         { "from": "notes", "default": "" }
+   },
+   "wrap": {
+     "customer":  ["customer_name", "mobile"],
+     "preferences": ["style", "metal", "budget", "ring_size", "profile"]
+   },
+   "context": {
+     "channel": "studio",
+     "source": "FYRS"
+   }
  },
- "answer_key_to_question": {
-   "who": "Q1. Who are you purchasing for?",
-   "gender": "Q2. Gender",
-   "occasion": "Q4. Occasion",
-   "purpose": "Q5. Purpose",
-   "profession": "Q3. Profession"
+ "response": {
+   "type": "json",
+   "xml_root": "BackendResponse"
  }
 }
