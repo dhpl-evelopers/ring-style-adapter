@@ -25,13 +25,21 @@ API_KEY_REQUIRED = os.getenv("API_KEY_REQUIRED", "false").lower() == "true"
 API_KEY          = os.getenv("API_KEY", "")
 
 # ---------------- Load mapping.config.json ----------------
-CFG_PATH = os.path.join(os.path.dirname(_file_), "mapping.config.json")
+from pathlib import Path
+import sys
+import logging, json
+log = logging.getLogger("adapter")
+CFG_PATH = Path(__file__).parent / "mapping.config.json"
 try:
-    with open(CFG_PATH, "r", encoding="utf-8") as f:
-        CFG = json.load(f)
-except Exception as e:
-    log.error("Failed to load mapping.config.json: %s", e)
-    CFG = {}
+   with CFG_PATH.open("r", encoding="utf-8") as f:
+       mapping = json.load(f)
+   log.info("Loaded mapping.json with %d keys", len(mapping))
+except FileNotFoundError:
+   log.error("mapping.config.json not found at %s", CFG_PATH)
+   sys.exit(1)
+except json.JSONDecodeError as e:
+   log.error("mapping.config.json invalid JSON: %s", e)
+   sys.exit(1)
 
 # Canonical XML root expected by backend
 XML_ROOT = CFG.get("xml_root", "data")
