@@ -1,17 +1,188 @@
-[
- { "key": "q1_style",      "text": "Who are you purchasing for?" },
- { "key": "q2_gender",     "text": "Gender" },
- { "key": "q3_profession", "text": "Profession" },
- { "key": "q4_purpose",    "text": "Purpose" },
- { "key": "q5_typical",    "text": "How would you describe your typical day?" },
- { "key": "q6_weekend",    "text": "How do you prefer to spend your weekends?" },
- { "key": "q7_work_dress", "text": "How do you typically dress for work?" },
- { "key": "q8_social",     "text": "How do you typically dress for social events?" },
- { "key": "q9_hobbies",    "text": "Hobbies" },
- { "key": "q10_persona",   "text": "How would you describe your style?" },
- { "key": "q11_color",     "text": "Favorite colour" },
- { "key": "q12_metal",     "text": "Preferred metal" },
- { "key": "q13_budget",    "text": "Budget" },
- { "key": "q14_size",      "text": "Ring size" },
- { "key": "q15_profile",   "text": "Profile" }
-]
+{
+
+  "keyToQuestionId": {
+
+    "who": 70955,
+
+    "gender": 70956,
+
+    "profession": 70961,
+
+    "occasion": 70962,
+
+    "purpose": 70969,
+
+    "day": 70766,
+
+    "weekend": 70765,
+
+    "dress_work": 70767,
+
+    "dress_social": 70768,
+
+    "long_line": 70970,
+
+    "painting": 70971,
+
+    "mom_sick": 70972,
+
+    "last_minute": 70973
+
+  },
+
+  "options": {
+
+    "70955": {
+
+      "Self": 299504,
+
+      "Others": 299505
+
+    },
+
+    "70956": {
+
+      "Male": 299508,
+
+      "Female": 299507
+
+    },
+
+    "70961": {
+
+      "Knowledge Based: IT/ Marketing/ Architect/ Lawyer/ Teacher/ Accountant": 299510,
+
+      "Skill Based/Manual: Home-maker/ Baker/ Make-up Artist/ Graphics & VFX/ Photographer": 299511,
+
+      "Creative: Interior Designer/ Content Writer/ Fashion Designer/ UI-UX Designer": 299512,
+
+      "Service & Hospitality: Retail Sales Person/ Hotel Staff/ Flight Attendants/ Chefs/ Nurses": 299513,
+
+      "Entrepreneur & Executive: Founder/ CEO/ CXO/ Board Member": 299514,
+
+      "Business Owner: Proprietor/ Partner": 299515
+
+    },
+
+    "70962": {
+
+      "Anniversary": 299520,
+
+      "Birthday": 299521,
+
+      "Engagement": 299522,
+
+      "Graduation": 299523,
+
+      "Self-Gift": 299524,
+
+      "To Be Mother": 299525,
+
+      "Wedding": 299526,
+
+      "First Salary": 299527,
+
+      "Celebrating a win": 299528
+
+    },
+
+    "70969": {
+
+      "Office wear": 299530,
+
+      "Daily wear": 299531,
+
+      "Party-wear": 299532
+
+    },
+
+    "70766": {
+
+      "Calendarized Set Routine": 299540,
+
+      "Busy With a lot of Activities": 299541
+
+    },
+
+    "70765": {
+
+      "Relaxing at Home Solo": 299550,
+
+      "Going out & socialising": 299551,
+
+      "Engaging in Hobbies": 299552
+
+    },
+
+    "70767": {
+
+      "Business Formals: Tie-Suit/ Skirt Blazer": 299560,
+
+      "Business Casuals: Shirt-Pants/ Trouser": 299561,
+
+      "Everyday Wear: Jeans & T-Shirt": 299562
+
+    },
+
+    "70768": {
+
+      "Formals: Tie-Suit & Gown": 299570,
+
+      "Semi-Formals: Shirt-Pant & Dresses": 299571,
+
+      "Everyday Wear: Jeans & T-Shirt": 299572
+
+    },
+
+    "70970": {
+
+      "You will talk to people nearby": 299580,
+
+      "You prefer to be on your own": 299581
+
+    },
+
+    "70971": {
+
+      "You focus on the artistic details": 299590,
+
+      "You value the meaning of the art & origin": 299591
+
+    },
+
+    "70972": {
+
+      "You will cancel the meeting to care for your mother": 299600,
+
+      "You will arrange care for your mother & attend the meeting": 299601
+
+    },
+
+    "70973": {
+
+      "You love them & adjust your day to accommodate the plan": 299610,
+
+      "You dislike last-minute plans & prefer planning ahead": 299611
+
+    }
+
+  },
+
+  "defaults": {
+
+    "full_name": "",
+
+    "email": "",
+
+    "phone_number": "",
+
+    "date": "",
+
+    "request_id": "",
+
+    "result_key": ""
+
+  }
+
+}
+ 
