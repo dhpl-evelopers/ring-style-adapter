@@ -1,172 +1,78 @@
 {
-
-  "forward": {
-
-    "timeout_sec": 30,
-
-    "headers": {
-
-      "Accept": "application/json",
-
-      "Content-Type": "application/json"
-
-    }
-
-  },
-
-  "mapping": {
-
-    "source_root": null,
-
-    "contact": {
-
-      "name": {
-
-        "from_any": ["full_name", "name", "customer.name"],
-
-        "required": true,
-
-        "default": ""
-
-      },
-
-      "email": {
-
-        "from_any": ["email", "customer.email"],
-
-        "required": true,
-
-        "default": ""
-
-      },
-
-      "phone_number": {
-
-        "from_any": ["phone_number", "mobile", "customer.mobile", "phone"],
-
-        "required": true,
-
-        "default": ""
-
-      },
-
-      "birth_date": {
-
-        "from_any": ["birth_date", "dob", "date_of_birth"],
-
-        "required": true,
-
-        "default": ""
-
-      },
-
-      "request_id": {
-
-        "from_any": ["request_id", "sessionId", "session_id"],
-
-        "required": true,
-
-        "default": ""
-
-      },
-
-      "result_key": {
-
-        "from_any": ["result_key", "resultKey", "resultkey"],
-
-        "required": true,
-
-        "default": ""
-
-      }
-
-    },
-
-    /*
-
-      If the UI already sends the array `questionAnswers` in the exact
-
-      backend format, we just pass it through.
-
-      Otherwise, we synthesize questionAnswers from the flat UI fields
-
-      using the catalog below (key -> exact question text).
-
-    */
-
-    "answers_path": "questionAnswers",
-
-    "catalog": [
-
-      { "key": "who",           "text": "Who are you purchasing for?" },
-
-      { "key": "gender",        "text": "Gender" },
-
-      { "key": "profession",    "text": "Profession" },
-
-      { "key": "purpose",       "text": "Purpose" },
-
-      { "key": "typical_day",   "text": "How would you describe your typical day?" },
-
-      { "key": "weekends",      "text": "How do you prefer to spend your weekends?" },
-
-      { "key": "work_dress",    "text": "How do you typically dress for work?" },
-
-      { "key": "social_dress",  "text": "How do you typically dress for social events?" },
-
-      { "key": "style",         "text": "How would you describe your style?" },
-
-      { "key": "long_line",     "text": "Are you open to a long line?" },
-
-      { "key": "painting",      "text": "When you see a painting, what appeals to you most?" },
-
-      { "key": "mother_unwell", "text": "Your mother is not feeling well & you have an important meeting to drive?" },
-
-      { "key": "last_min",      "text": "Last minute plans?" }
-
-    ],
-
-    /*
-
-      Optional value normalization hooks.
-
-      These are only examples; the adapter will keep the original value
-
-      if no rule matches.
-
-    */
-
-    "normalizers": {
-
-      "gender": {
-
-        "map": {
-
-          "m": "Male",
-
-          "male": "Male",
-
-          "f": "Female",
-
-          "female": "Female",
-
-          "other": "Other"
-
-        }
-
-      }
-
-    }
-
-  },
-
-  "response": {
-
-    "type": "json",
-
-    "xml_root": "BackendResponse"
-
-  }
-
+ "questions": [
+   {
+     "id": "Q1",
+     "question": "Who are you purchasing for?",
+     "options": ["Self", "Gift"]
+   },
+   {
+     "id": "Q2",
+     "question": "Gender",
+     "options": ["Male", "Female", "Other"]
+   },
+   {
+     "id": "Q3",
+     "question": "Profession",
+     "options": [
+       "Skill Based/Manual: Home-maker",
+       "Baker",
+       "Make-up Artist",
+       "Graphics & VFX",
+       "Photographer",
+       "Designer",
+       "Business Professional",
+       "Other"
+     ]
+   },
+   {
+     "id": "Q4",
+     "question": "Occasion",
+     "options": ["Wedding", "Anniversary", "Daily wear", "Special Occasion"]
+   },
+   {
+     "id": "Q5",
+     "question": "Purpose",
+     "options": ["Work", "Daily wear", "Party wear"]
+   },
+   {
+     "id": "Q6",
+     "question": "How would you describe your typical day?",
+     "options": ["On the move", "Routine", "Spontaneous & Free Spirited"]
+   },
+   {
+     "id": "Q7",
+     "question": "How do you prefer to spend your weekends?",
+     "options": ["Going out & socializing", "Relaxing at home", "Traveling"]
+   },
+   {
+     "id": "Q8",
+     "question": "How do you typically dress for work?",
+     "options": ["Business Formals", "Smart Casuals", "Creative Attire"]
+   },
+   {
+     "id": "Q9",
+     "question": "How do you typically dress for social events?",
+     "options": ["Stylish & Chic", "Minimalist", "Traditional", "Trendy"]
+   },
+   {
+     "id": "Q10",
+     "question": "You are waiting in a long line",
+     "options": ["Talk to people", "Scroll phone", "Stay quiet"]
+   },
+   {
+     "id": "Q11",
+     "question": "Whenever you see a painting",
+     "options": ["Artistic detailing", "Colors", "Overall feel"]
+   },
+   {
+     "id": "Q12",
+     "question": "Your mother is not feeling well & you have an important meeting?",
+     "options": ["Reschedule meeting", "Attend meeting", "Balance both"]
+   },
+   {
+     "id": "Q13",
+     "question": "Last minute plans",
+     "options": ["Go with the flow", "Decline politely", "Plan ahead"]
+   }
+ ]
 }
- 
