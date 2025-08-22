@@ -1,38 +1,19 @@
 {
  "forward": {
    "timeout_sec": 30,
-   "headers": {
-     "Accept": "application/json"
-   }
+   "headers": { "Accept": "application/json" }
  },
  "mapping": {
-   "source_root": null,
-   "contact": {
-     "name":        { "from": "customer.name" },
-     "email":       { "from": "customer.email", "default": "" },
-     "phone_number":{ "from": "customer.mobile" },
-     "birth_date":  { "from": "customer.birth_date", "default": "" },
-     "request_id":  { "from": "sessionId" }
-   },
    "answers_path": "answers",
-   "questions": [
-     { "key": "q_for",        "text": "Who are you purchasing for?" },
-     { "key": "q_gender",     "text": "Gender" },
-     { "key": "q_profession", "text": "Profession" },
-     { "key": "q_occasion",   "text": "Occasion" },
-     { "key": "q_purpose",    "text": "Purpose" },
-     { "key": "q_day",        "text": "How would you describe your typical day?" },
-     { "key": "q_weekend",    "text": "How do you prefer to spend your weekends?" },
-     { "key": "q_work_dress", "text": "How do you typically dress for work?" },
-     { "key": "q_social_dress","text": "How do you typically dress for social events?" },
-     { "key": "q_queue",      "text": "You are waiting in a long line" },
-     { "key": "q_painting",   "text": "Whenever you see a painting" },
-     { "key": "q_emergency",  "text": "Your mother is not felling well & you have an important meeting to drive" },
-     { "key": "q_last_min",   "text": "Last minute plans" }
-   ]
+   "fields": {
+     "request_id":   { "from": "sessionId" },
+     "full_name":    { "from": "customer.name" },
+     "email":        { "from": "customer.email", "default": "" },
+     "phone_number": { "from": "customer.mobile" },
+     "birth_date":   { "from": "customer.birth_date", "default": "" }
+   }
+   /* Optional: you can keep your 'questions' array for documentation,
+      but the current adapter ignores it. */
  },
- "response": {
-   "type": "json",
-   "xml_root": "BackendResponse"
- }
+ "response": { "type": "json" }
 }
