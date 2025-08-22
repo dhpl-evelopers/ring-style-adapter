@@ -1,282 +1,190 @@
 import os
-
 import json
-
 import logging
-
 from typing import Any, Dict, List, Optional
-
-from fastapi import FastAPI, Request, HTTPException
-
-from fastapi.responses import PlainTextResponse, JSONResponse
-
 import httpx
-
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import xml.etree.ElementTree as ET
 
+# --------------------------------------------------
+# Logging
+# --------------------------------------------------
+log = logging.getLogger("adapter")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-log = logging.getLogger("adapter")
-
+# --------------------------------------------------
+# FastAPI
+# --------------------------------------------------
 app = FastAPI(title="Ring Style Adapter", version="2.1.0")
+app.add_middleware(
+   CORSMiddleware,
+   allow_origins=["*"],
+   allow_headers=["*"],
+   allow_methods=["*"],
+)
 
-# --- Env ---
-
+# --------------------------------------------------
+# Environment
+# --------------------------------------------------
+# Set these in Azure App Service > Configuration
 BACKEND_POST_URL = os.getenv("BACKEND_POST_URL", "").strip()
-
 BACKEND_GET_URL  = os.getenv("BACKEND_GET_URL", "").strip()
-
 API_KEY_REQUIRED = os.getenv("API_KEY_REQUIRED", "false").lower() == "true"
+API_KEY          = os.getenv("API_KEY", "").strip()
+if not BACKEND_POST_URL:
+   log.warning("BACKEND_POST_URL is not set")
+# --------------------------------------------------
+# Config loader
+# --------------------------------------------------
+# IMPORTANT: the filename here must match the actual file in the repo
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "mapping.config.json")
+def _deep_get(d: Dict[str, Any], path: Optional[str], default: Any = None):
+   """Simple dotted-path getter, returns default if any part is missing."""
+   if not path:
+       return d
+   cur = d
+   for part in path.split("."):
+       if not isinstance(cur, dict) or part not in cur:
+           return default
+       cur = cur[part]
+   return cur
+def _transform(v: Any, name: Optional[str]) -> Any:
+   if name == "lower" and isinstance(v, str):
+       return v.lower()
+   if name == "int":
+       try:
+           return int(v)
+       except Exception:
+           return v
+   return v
+def _to_xml(payload: Dict[str, Any]) -> str:
+   """
+   Build the XML your backend expects.
+   It parses the 'questions' list of dicts with keys: id, text, value.
+   """
+   root = ET.Element("root")
+   # Simple scalars first (if present)
+   def add(tag: str, val: Optional[str]):
+       if val is None:
+           return
+       el = ET.SubElement(root, tag)
+       el.text = str(val)
+   add("request_id", payload.get("request_id"))
+   add("name",       payload.get("name"))
+   add("email",      payload.get("email"))
+   add("phone_number", payload.get("phone_number"))
+   add("birth_date", payload.get("birth_date"))
+   # QuestionAnswers block
+   qa = ET.SubElement(root, "questionAnswers")
+   for q in payload.get("questions", []):
+       q_el = ET.SubElement(qa, "question", attrib={"id": q.get("id", "")})
+       t_el = ET.SubElement(q_el, "text")
+       t_el.text = str(q.get("text", "")) if q.get("text") is not None else ""
+       v_el = ET.SubElement(q_el, "value")
+       v_el.text = str(q.get("value", "")) if q.get("value") is not None else ""
+   # Pretty string
+   return ET.tostring(root, encoding="utf-8", method="xml").decode("utf-8")
 
-API_KEY_HEADER   = os.getenv("API_KEY", "").strip()
-
-# --- Load mapping.config.json (shipped alongside app.py) ---
-
-CFG_PATH = os.path.join(os.path.dirname(__file__), "mapping.config.json")
-
+# Load mapping config once at startup
 try:
-
-    with open(CFG_PATH, "r", encoding="utf-8") as f:
-
-        CFG: Dict[str, Any] = json.load(f)
-
+   with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+       CFG = json.load(f)
+   log.info(f"Loaded mapping config from {CONFIG_PATH}")
 except Exception as e:
-
-    log.error("Failed to load mapping.config.json: %s", e)
-
-    CFG = {}
-
-# ---------------------------
-
-# Helpers
-
-# ---------------------------
-
-def _dig(d: Dict[str, Any], path: Optional[str]) -> Any:
-
-    """Safely get nested value via dotted path."""
-
-    if not path:
-
-        return d
-
-    cur: Any = d
-
-    for key in path.split("."):
-
-        if isinstance(cur, dict) and key in cur:
-
-            cur = cur[key]
-
-        else:
-
-            return None
-
-    return cur
-
-def _xml_text(elem: Optional[ET.Element]) -> str:
-
-    return elem.text if elem is not None and elem.text is not None else ""
-
-def ensure_xml(value: str) -> str:
-
-    # Minimal escaping for XML text nodes
-
-    return (value or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-def make_backend_xml(payload: Dict[str, Any]) -> str:
-
-    """
-
-    Build the XML the backend expects:
-<root>
-<request_id>...</request_id>
-<full_name>...</full_name>
-<email>...</email>
-<phone_number>...</phone_number>
-<birth_date>...</birth_date>
-<questionAnswers>
-<question><id>..</id><value>..</value></question>*
-</questionAnswers>
-</root>
-
-    """
-
-    mapping = CFG.get("mapping", {})
-
-    fields_map: Dict[str, Any] = mapping.get("fields", {})
-
-    answers_path: str = mapping.get("answers_path", "answers")
-
-    answer_id_key: str = mapping.get("answer_id_key", "id")
-
-    answer_val_key: str = mapping.get("answer_value_key", "value")
-
-    # 1) Pull top‑level fields safely (with defaults)
-
-    request_id = _dig(payload, fields_map.get("request_id", {}).get("from", "sessionId")) or ""
-
-    full_name  = _dig(payload, fields_map.get("full_name", {}).get("from", "customer.name")) or ""
-
-    email      = _dig(payload, fields_map.get("email", {}).get("from", "")) or ""
-
-    phone      = _dig(payload, fields_map.get("phone_number", {}).get("from", "customer.mobile")) or ""
-
-    birth_date = _dig(payload, fields_map.get("birth_date", {}).get("from", "")) or ""
-
-    # 2) Build QnA list
-
-    answers_raw = _dig(payload, answers_path) or []
-
-    qna: List[Dict[str, str]] = []
-
-    if isinstance(answers_raw, list):
-
-        for a in answers_raw:
-
-            qid = (a or {}).get(answer_id_key, "")
-
-            val = (a or {}).get(answer_val_key, "")
-
-            if qid != "" or val != "":
-
-                qna.append({"id": str(qid), "value": str(val)})
-
-    # 3) Compose XML
-
-    root = ET.Element("root")
-
-    ET.SubElement(root, "request_id").text   = request_id
-
-    ET.SubElement(root, "full_name").text    = full_name
-
-    ET.SubElement(root, "email").text        = email
-
-    ET.SubElement(root, "phone_number").text = phone
-
-    ET.SubElement(root, "birth_date").text   = birth_date
-
-    qa_root = ET.SubElement(root, "questionAnswers")
-
-    for item in qna:
-
-        q = ET.SubElement(qa_root, "question")
-
-        ET.SubElement(q, "id").text    = item["id"]
-
-        ET.SubElement(q, "value").text = item["value"]
-
-    # Serialize compact XML string
-
-    xml_bytes = ET.tostring(root, encoding="utf-8")
-
-    return xml_bytes.decode("utf-8")
-
-async def forward_to_backend(xml_payload: str) -> httpx.Response:
-
-    if not BACKEND_POST_URL:
-
-        raise HTTPException(status_code=500, detail="BACKEND_POST_URL is not configured.")
-
-    headers = {
-
-        "Content-Type": "application/xml",
-
-        "Accept": "application/json",
-
-    }
-
-    if API_KEY_REQUIRED and API_KEY_HEADER:
-
-        headers["x-api-key"] = API_KEY_HEADER
-
-    timeout = httpx.Timeout(CFG.get("forward", {}).get("timeout_sec", 30.0))
-
-    async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
-
-        return await client.post(BACKEND_POST_URL, content=xml_payload.encode("utf-8"), headers=headers)
-
-# ---------------------------
-
+   log.exception(f"Failed to load mapping config from {CONFIG_PATH}: {e}")
+   CFG = {
+       "forward": {"timeout_sec": 30, "headers": {"Accept": "application/json"}},
+       "mapping": {"answers_path": "answers", "fields": {}, "questions": []},
+       "response": {"type": "json", "xml_root": "BackendResponse"},
+   }
+
+# --------------------------------------------------
 # Routes
-
-# ---------------------------
-
+# --------------------------------------------------
 @app.get("/", response_class=PlainTextResponse)
-
 async def root():
-
-    return "Ring Style Adapter OK"
+   return "Ring Style Adapter OK"
 
 @app.get("/ping", response_class=PlainTextResponse)
-
 async def ping():
-
-    return "pong"
+   return "pong"
 
 @app.post("/adapter")
-
 async def adapter(request: Request):
-
-    """
-
-    Accepts JSON (preferred) or XML.
-
-    - If JSON: map to backend XML using mapping.config.json and forward.
-
-    - If XML: pass through to backend (but still ensure the required tags exist).
-
-    """
-
-    ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
-
-    try:
-
-        if ctype == "application/json":
-
-            body: Dict[str, Any] = await request.json()
-
-            xml_payload = make_backend_xml(body)
-
-        elif ctype in ("application/xml", "text/xml"):
-
-            # Pass‑through but make sure it is valid XML
-
-            raw = await request.body()
-
-            try:
-
-                # Validate / normalize
-
-                _ = ET.fromstring(raw.decode("utf-8"))
-
-                xml_payload = raw.decode("utf-8")
-
-            except ET.ParseError as e:
-
-                raise HTTPException(status_code=400, detail=f"Invalid XML: {e}")
-
-        else:
-
-            raise HTTPException(status_code=415, detail="Unsupported Content-Type. Use application/json or application/xml.")
-
-        log.info("Forwarding mapped XML to backend (%d bytes)", len(xml_payload))
-
-        resp = await forward_to_backend(xml_payload)
-
-        # Mirror backend response (assumed JSON)
-
-        return JSONResponse(status_code=resp.status_code, content=resp.json() if resp.content else {})
-
-    except HTTPException:
-
-        raise
-
-    except Exception as e:
-
-        log.exception("Adapter error")
-
-        raise HTTPException(status_code=500, detail=f"Adapter error: {e}")
-log.info
-This domain may be for sale!
- 
+   """
+   1) Accept JSON or XML.
+   2) If JSON: map to backend XML using mapping.config.json.
+   3) POST XML to BACKEND_POST_URL (Content-Type: application/xml).
+   4) Mirror backend response as JSON or text depending on config.
+   """
+   if not BACKEND_POST_URL:
+       raise HTTPException(500, "BACKEND_POST_URL is not configured")
+   ctype = request.headers.get("content-type", "").lower()
+   # Prepare headers to forward
+   headers = (CFG.get("forward") or {}).get("headers") or {}
+   fwd_headers = {k: v for (k, v) in headers.items()}
+   fwd_headers["Content-Type"] = "application/xml"
+   if API_KEY_REQUIRED and API_KEY:
+       fwd_headers["x-api-key"] = API_KEY
+   timeout = int(((CFG.get("forward") or {}).get("timeout_sec") or 30))
+   # Build XML to send to backend
+   try:
+       if "xml" in ctype:
+           # pass-through
+           body_bytes = await request.body()
+           xml_to_send = body_bytes.decode("utf-8")
+       else:
+           # assume JSON
+           data = await request.json()
+           mp: Dict[str, Any] = (CFG.get("mapping") or {})
+           fields: Dict[str, Any] = (mp.get("fields") or {})
+           answers_path: str = mp.get("answers_path", "answers")
+           q_defs: List[Dict[str, str]] = (mp.get("questions") or [])
+           # 1) map scalar fields
+           out: Dict[str, Any] = {}
+           for out_name, spec in fields.items():
+               src = spec.get("from")
+               default = spec.get("default")
+               transform = spec.get("transform")
+               raw_val = _deep_get(data, src, default)
+               out[out_name] = _transform(raw_val, transform)
+           # normalize common aliases
+           out["name"] = out.get("name") or out.get("customer_name")
+           out["phone_number"] = out.get("phone_number") or out.get("mobile")
+           # 2) map questions
+           # incoming answers is a list of {"id": "...", "value": "..."}
+           ans_list: List[Dict[str, Any]] = _deep_get(data, answers_path, []) or []
+           text_by_id = {q["key"]: q.get("text", "") for q in q_defs if "key" in q}
+           questions: List[Dict[str, Any]] = []
+           for item in ans_list:
+               qid = item.get("id")
+               val = item.get("value")
+               if not qid:
+                   continue
+               questions.append({
+                   "id": qid,
+                   "text": text_by_id.get(qid, ""),
+                   "value": val
+               })
+           out["questions"] = questions
+           xml_to_send = _to_xml(out)
+       # 3) call backend
+       async with httpx.AsyncClient(timeout=timeout) as client:
+           resp = await client.post(BACKEND_POST_URL, data=xml_to_send, headers=fwd_headers)
+       # 4) mirror/normalize response
+       if (CFG.get("response") or {}).get("type") == "json":
+           # try to decode as json; if fails, return text
+           try:
+               return JSONResponse(resp.json(), status_code=resp.status_code)
+           except Exception:
+               return PlainTextResponse(resp.text, status_code=resp.status_code)
+       else:
+           # return raw text
+           return PlainTextResponse(resp.text, status_code=resp.status_code)
+   except HTTPException:
+       raise
+   except Exception as e:
+       log.exception("Adapter error")
+       raise HTTPException(500, f"Adapter error: {e}")
