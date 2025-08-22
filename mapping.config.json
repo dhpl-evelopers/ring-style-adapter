@@ -1,43 +1,172 @@
 {
- "xml_root": "request",
- "result_key_field_candidates": [
-   "result_key",
-   "response_id",
-   "responseKey",
-   "resultKey"
- ],
- "field_map": {
-   "full_name": "name",
-   "name": "name",
-   "email": "email",
-   "phone": "phoneNumber",
-   "phone_number": "phoneNumber",
-   "birth_date": "birth_date",
-   "date": "birth_date",
-   "request_id": "request_id",
-   "result_key": "result_key"
- },
- "answer_key_to_question": {
-   "who": "Q1. Who are you purchasing for?",
-   "gender": "Q2. Gender",
-   "profession": "Q3. Profession",
-   "occasion": "Q4. Occasion",
-   "purpose": "Q5. Purpose",
-   "day": "Q6. How would you describe your typical day?",
-   "weekend": "Q7. How do you prefer to spend your weekends?",
-   "dress_work": "Q8. How do you typically dress for work?",
-   "dress_social": "Q9. How do you typically dress for social events?",
-   "long_line": "Q10. You are waiting in a long line",
-   "painting": "Q11. Whenever you see a painting",
-   "mother": "Q12. Your mother is not felling well & you have an important meeting to drive",
-   "last_minute": "Q13. Last minute plans"
- },
- "defaults": {
-   "name": "",
-   "email": "",
-   "phoneNumber": "",
-   "birth_date": "",
-   "request_id": "",
-   "result_key": ""
- }
+
+  "forward": {
+
+    "timeout_sec": 30,
+
+    "headers": {
+
+      "Accept": "application/json",
+
+      "Content-Type": "application/json"
+
+    }
+
+  },
+
+  "mapping": {
+
+    "source_root": null,
+
+    "contact": {
+
+      "name": {
+
+        "from_any": ["full_name", "name", "customer.name"],
+
+        "required": true,
+
+        "default": ""
+
+      },
+
+      "email": {
+
+        "from_any": ["email", "customer.email"],
+
+        "required": true,
+
+        "default": ""
+
+      },
+
+      "phone_number": {
+
+        "from_any": ["phone_number", "mobile", "customer.mobile", "phone"],
+
+        "required": true,
+
+        "default": ""
+
+      },
+
+      "birth_date": {
+
+        "from_any": ["birth_date", "dob", "date_of_birth"],
+
+        "required": true,
+
+        "default": ""
+
+      },
+
+      "request_id": {
+
+        "from_any": ["request_id", "sessionId", "session_id"],
+
+        "required": true,
+
+        "default": ""
+
+      },
+
+      "result_key": {
+
+        "from_any": ["result_key", "resultKey", "resultkey"],
+
+        "required": true,
+
+        "default": ""
+
+      }
+
+    },
+
+    /*
+
+      If the UI already sends the array `questionAnswers` in the exact
+
+      backend format, we just pass it through.
+
+      Otherwise, we synthesize questionAnswers from the flat UI fields
+
+      using the catalog below (key -> exact question text).
+
+    */
+
+    "answers_path": "questionAnswers",
+
+    "catalog": [
+
+      { "key": "who",           "text": "Who are you purchasing for?" },
+
+      { "key": "gender",        "text": "Gender" },
+
+      { "key": "profession",    "text": "Profession" },
+
+      { "key": "purpose",       "text": "Purpose" },
+
+      { "key": "typical_day",   "text": "How would you describe your typical day?" },
+
+      { "key": "weekends",      "text": "How do you prefer to spend your weekends?" },
+
+      { "key": "work_dress",    "text": "How do you typically dress for work?" },
+
+      { "key": "social_dress",  "text": "How do you typically dress for social events?" },
+
+      { "key": "style",         "text": "How would you describe your style?" },
+
+      { "key": "long_line",     "text": "Are you open to a long line?" },
+
+      { "key": "painting",      "text": "When you see a painting, what appeals to you most?" },
+
+      { "key": "mother_unwell", "text": "Your mother is not feeling well & you have an important meeting to drive?" },
+
+      { "key": "last_min",      "text": "Last minute plans?" }
+
+    ],
+
+    /*
+
+      Optional value normalization hooks.
+
+      These are only examples; the adapter will keep the original value
+
+      if no rule matches.
+
+    */
+
+    "normalizers": {
+
+      "gender": {
+
+        "map": {
+
+          "m": "Male",
+
+          "male": "Male",
+
+          "f": "Female",
+
+          "female": "Female",
+
+          "other": "Other"
+
+        }
+
+      }
+
+    }
+
+  },
+
+  "response": {
+
+    "type": "json",
+
+    "xml_root": "BackendResponse"
+
+  }
+
 }
+ 
