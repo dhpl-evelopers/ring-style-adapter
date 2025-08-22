@@ -12,8 +12,6 @@
      "phone_number": { "from": "customer.mobile" },
      "birth_date":   { "from": "customer.birth_date", "default": "" }
    }
-   /* Optional: you can keep your 'questions' array for documentation,
-      but the current adapter ignores it. */
  },
  "response": { "type": "json" }
 }
