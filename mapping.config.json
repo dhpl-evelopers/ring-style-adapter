@@ -1,188 +1,125 @@
 {
-
-  "keyToQuestionId": {
-
-    "who": 70955,
-
-    "gender": 70956,
-
-    "profession": 70961,
-
-    "occasion": 70962,
-
-    "purpose": 70969,
-
-    "day": 70766,
-
-    "weekend": 70765,
-
-    "dress_work": 70767,
-
-    "dress_social": 70768,
-
-    "long_line": 70970,
-
-    "painting": 70971,
-
-    "mom_sick": 70972,
-
-    "last_minute": 70973
-
-  },
-
-  "options": {
-
-    "70955": {
-
-      "Self": 299504,
-
-      "Others": 299505
-
-    },
-
-    "70956": {
-
-      "Male": 299508,
-
-      "Female": 299507
-
-    },
-
-    "70961": {
-
-      "Knowledge Based: IT/ Marketing/ Architect/ Lawyer/ Teacher/ Accountant": 299510,
-
-      "Skill Based/Manual: Home-maker/ Baker/ Make-up Artist/ Graphics & VFX/ Photographer": 299511,
-
-      "Creative: Interior Designer/ Content Writer/ Fashion Designer/ UI-UX Designer": 299512,
-
-      "Service & Hospitality: Retail Sales Person/ Hotel Staff/ Flight Attendants/ Chefs/ Nurses": 299513,
-
-      "Entrepreneur & Executive: Founder/ CEO/ CXO/ Board Member": 299514,
-
-      "Business Owner: Proprietor/ Partner": 299515
-
-    },
-
-    "70962": {
-
-      "Anniversary": 299520,
-
-      "Birthday": 299521,
-
-      "Engagement": 299522,
-
-      "Graduation": 299523,
-
-      "Self-Gift": 299524,
-
-      "To Be Mother": 299525,
-
-      "Wedding": 299526,
-
-      "First Salary": 299527,
-
-      "Celebrating a win": 299528
-
-    },
-
-    "70969": {
-
-      "Office wear": 299530,
-
-      "Daily wear": 299531,
-
-      "Party-wear": 299532
-
-    },
-
-    "70766": {
-
-      "Calendarized Set Routine": 299540,
-
-      "Busy With a lot of Activities": 299541
-
-    },
-
-    "70765": {
-
-      "Relaxing at Home Solo": 299550,
-
-      "Going out & socialising": 299551,
-
-      "Engaging in Hobbies": 299552
-
-    },
-
-    "70767": {
-
-      "Business Formals: Tie-Suit/ Skirt Blazer": 299560,
-
-      "Business Casuals: Shirt-Pants/ Trouser": 299561,
-
-      "Everyday Wear: Jeans & T-Shirt": 299562
-
-    },
-
-    "70768": {
-
-      "Formals: Tie-Suit & Gown": 299570,
-
-      "Semi-Formals: Shirt-Pant & Dresses": 299571,
-
-      "Everyday Wear: Jeans & T-Shirt": 299572
-
-    },
-
-    "70970": {
-
-      "You will talk to people nearby": 299580,
-
-      "You prefer to be on your own": 299581
-
-    },
-
-    "70971": {
-
-      "You focus on the artistic details": 299590,
-
-      "You value the meaning of the art & origin": 299591
-
-    },
-
-    "70972": {
-
-      "You will cancel the meeting to care for your mother": 299600,
-
-      "You will arrange care for your mother & attend the meeting": 299601
-
-    },
-
-    "70973": {
-
-      "You love them & adjust your day to accommodate the plan": 299610,
-
-      "You dislike last-minute plans & prefer planning ahead": 299611
-
-    }
-
-  },
-
-  "defaults": {
-
-    "full_name": "",
-
-    "email": "",
-
-    "phone_number": "",
-
-    "date": "",
-
-    "request_id": "",
-
-    "result_key": ""
-
-  }
-
+ "xml_root": "request",
+ "result_key_field_candidates": [
+   "result_key",
+   "response_id",
+   "responseKey",
+   "resultKey"
+ ],
+ "field_map": {
+   "full_name": "name",
+   "email": "email",
+   "phone": "phoneNumber",
+   "phone_number": "phoneNumber",
+   "birth_date": "birth_date",
+   "date": "birth_date"
+ },
+ "keyToQuestionId": {
+   "who": 70955,
+   "gender": 70956,
+   "profession": 70961,
+   "occasion": 70962,
+   "purpose": 70969,
+   "day": 70766,
+   "weekend": 70765,
+   "dress_work": 70767,
+   "dress_social": 70768,
+   "long_line": 70970,
+   "painting": 70971,
+   "meeting": 70972,
+   "last_minute": 70973
+ },
+ "options": {
+   "70955": {
+     "Self": 299504,
+     "Others": 299505
+   },
+   "70956": {
+     "Male": 299508,
+     "Female": 299507
+   },
+   "70961": {
+     "Knowledge Based: IT/ Marketing/ Architect/ Lawyer/ Teacher/ Accountant": 299529,
+     "Skill Based/Manual: Home-maker/ Baker/ Make-up Artist/ Graphics & VFX/ Photographer": 299530,
+     "Creative: Interior Designer/ Content Writer/ Fashion Designer/ UI-UX Designer": 299527,
+     "Service & Hospitality: Retail Sales Person/ Hotel Staff/ Flight Attendants/ Chefs/ Nurses": 299531,
+     "Entrepreneur & Executive: Founder/ CEO/ CXO/ Board Member": 299532,
+     "Business Owner: Proprietor/ Partner": 299533
+   },
+   "70962": {
+     "Anniversary": 299534,
+     "Birthday": 299535,
+     "Engagement": 299536,
+     "Graduation": 299537,
+     "To Be Mother": 299538,
+     "Wedding": 299539,
+     "First Salary": 299540,
+     "Celebrating a win": 299541
+   },
+   "70969": {
+     "Office wear": 299543,
+     "Daily wear": 299544,
+     "Party-wear": 299545,
+     "Astrology": 299546,
+     "Investment": 299547,
+     "Festive/Function": 299548
+   },
+   "70766": {
+     "Calendarized Set Routine": 299549,
+     "Busy With a lot of Activities": 299550,
+     "Spontaneous & Free Spirited": 299551
+   },
+   "70765": {
+     "Relaxing at Home Solo": 299552,
+     "Going out & socialising": 299553,
+     "Engaging in Hobbies": 299554
+   },
+   "70767": {
+     "Business Formals: Tie-Suit/ Skirt Blazer": 299555,
+     "Business Casuals: Shirt-Pants/ Trouser": 299556,
+     "Everyday Wear: Jeans & T-Shirt": 299557
+   },
+   "70768": {
+     "Formals: Tie-Suit & Gown": 299558,
+     "Semi-Formals: Shirt-Pant & Dresses": 299559,
+     "Everyday Wear: Jeans & T-Shirt": 299560
+   },
+   "70970": {
+     "You will talk to people nearby": 299561,
+     "You prefer to be on your own": 299562
+   },
+   "70971": {
+     "You focus on the artistic details": 299563,
+     "You value the meaning of the art & origin": 299564
+   },
+   "70972": {
+     "You will cancel the meeting to care for your mother": 299565,
+     "You will arrange care for your mother & attend the meeting": 299566
+   },
+   "70973": {
+     "You love them & adjust your day to accommodate the plan": 299567,
+     "You dislike last-minute plans & prefer planning ahead": 299568
+   }
+ },
+ "questionOrder": [
+   70955,
+   70956,
+   70961,
+   70962,
+   70969,
+   70766,
+   70765,
+   70767,
+   70768,
+   70970,
+   70971,
+   70972,
+   70973
+ ],
+ "defaults": {
+   "name": "",
+   "email": "",
+   "phoneNumber": "",
+   "birth_date": ""
+ }
 }
- 
