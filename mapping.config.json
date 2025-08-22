@@ -2,31 +2,169 @@
 
   "mappings": {
 
-    "Q1": "Who are you purchasing for?",
+    "Q1": {
 
-    "Q2": "Gender",
+      "question": "Who are you purchasing for?",
 
-    "Q3": "Profession",
+      "allowed": ["Self", "Partner", "Spouse", "Family", "Friend", "Client", "Other"]
 
-    "Q4": "Occasion",
+    },
 
-    "Q5": "Purpose",
+    "Q2": {
 
-    "Q6": "How would you describe your typical day?",
+      "question": "Gender",
 
-    "Q7": "How do you prefer to spend your weekends?",
+      "allowed": ["Male", "Female", "Non-binary", "Prefer not to say"]
 
-    "Q8": "How do you typically dress for work?",
+    },
 
-    "Q9": "How do you typically dress for social events?",
+    "Q3": {
 
-    "Q10": "You are waiting in a long line, what do you do?",
+      "question": "Profession",
 
-    "Q11": "Whenever you see a painting, what do you imagine yourself as?",
+      "allowed": [
 
-    "Q12": "Your mother is not feeling well & you have an important meeting to drive, what will you do?",
+        "Designer","Engineer","Doctor","Lawyer","Photographer","Teacher",
 
-    "Q13": "Last minute plans, how do you respond?"
+        "Student","Entrepreneur","Consultant","Finance","Sales","Other"
+
+      ]
+
+    },
+
+    "Q4": {
+
+      "question": "Occasion",
+
+      "allowed": [
+
+        "Daily wear","Work","College","Anniversary","Birthday",
+
+        "Engagement","Wedding","Festive","Party","Gifting","Other"
+
+      ]
+
+    },
+
+    "Q5": {
+
+      "question": "Purpose",
+
+      "allowed": [
+
+        "Everyday essential","Statement piece","Gift","Heirloom",
+
+        "Investment","Casual wear","Work wear","Other"
+
+      ]
+
+    },
+
+    "Q6": {
+
+      "question": "How would you describe your typical day?",
+
+      "allowed": [
+
+        "Structured & planned","Balanced","Spontaneous & flexible"
+
+      ]
+
+    },
+
+    "Q7": {
+
+      "question": "How do you prefer to spend your weekends?",
+
+      "allowed": [
+
+        "At home / relaxing","Going out & socialising","Short getaways",
+
+        "Hobbies & fitness","Family time"
+
+      ]
+
+    },
+
+    "Q8": {
+
+      "question": "How do you typically dress for work?",
+
+      "allowed": [
+
+        "Formal","Business casual","Smart casual","Casual","Uniform"
+
+      ]
+
+    },
+
+    "Q9": {
+
+      "question": "How do you typically dress for social events?",
+
+      "allowed": [
+
+        "Classic & elegant","Stylish & chic","Minimalist",
+
+        "Bold / experimental","Traditional / ethnic"
+
+      ]
+
+    },
+
+    "Q10": {
+
+      "question": "You are waiting in a long line, what do you do?",
+
+      "allowed": [
+
+        "Wait patiently","Look for a quicker option","Multitask while waiting",
+
+        "Leave and come back later"
+
+      ]
+
+    },
+
+    "Q11": {
+
+      "question": "Whenever you see a painting, what do you imagine yourself as?",
+
+      "allowed": [
+
+        "Artist","Curator","Collector","Critic","Observer"
+
+      ]
+
+    },
+
+    "Q12": {
+
+      "question": "Your mother is not feeling well & you have an important meeting to drive, what will you do?",
+
+      "allowed": [
+
+        "Reschedule meeting","Attend meeting & check regularly",
+
+        "Ask sibling/family to help","Work from home","Cancel meeting"
+
+      ]
+
+    },
+
+    "Q13": {
+
+      "question": "Last minute plans, how do you respond?",
+
+      "allowed": [
+
+        "Plan ahead / avoid","Go with the flow","Join if convenient",
+
+        "Prefer to host instead"
+
+      ]
+
+    }
 
   }
 
