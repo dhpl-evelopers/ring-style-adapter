@@ -1,60 +1,67 @@
 {
-
-  "keyToQuestionId": {
-
-    "who": 70955,
-
-    "gender": 70956,
-
-    "profession": 70961,
-
-    "occasion": 70962,
-
-    "purpose": 70969,
-
-    "day": 70766,
-
-    "weekend": 70765,
-
-    "dress_work": 70767,
-
-    "dress_social": 70768,
-
-    "long_line": 70970,
-
-    "painting": 70971
-
-  },
-
-  "options": {
-
-    "70955": { "Self": 299504, "Gift": 299505 },
-
-    "70956": { "Female": 299507, "Male": 299508 },
-
-    "70961": { "Creative: Interior Designer/...": 299527, "Other": 299528 },
-
-    "70962": { "Wedding": 299537, "Formal event": 299538 },
-
-    "70969": { "Daily wear": 299566, "Professional": 299567 }
-
-  },
-
-  "questionOrder": [70955, 70956, 70961, 70962, 70969, 70766, 70765, 70767, 70768, 70970, 70971],
-
-  "defaults": {
-
-    "email": "",
-
-    "full_name": "",
-
-    "phone_number": "",
-
-    "date": "",
-
-    "result_key": ""
-
-  }
-
+ "xml_root": "data",
+ "defaults": {
+   "id": "",
+   "quizId": "12952",
+   "fullName": "",
+   "email": "",
+   "phoneNumber": "",
+   "dateOfBirth": "",
+   "resultKey": "",
+   "termsConditions": 0,
+   "website": "",
+   "organization": "",
+   "address1": "",
+   "address2": "",
+   "city": "",
+   "country": "",
+   "state": "",
+   "zipCode": ""
+ },
+ "field_map": {
+   "id": "id",
+   "quizid": "quizId",
+   "quiz_id": "quizId",
+   "name": "fullName",
+   "fullname": "fullName",
+   "full_name": "fullName",
+   "email": "email",
+   "phone": "phoneNumber",
+   "phonenumber": "phoneNumber",
+   "phone_number": "phoneNumber",
+   "mobile": "phoneNumber",
+   "mobile_number": "phoneNumber",
+   "dob": "dateOfBirth",
+   "birthdate": "dateOfBirth",
+   "birth_date": "dateOfBirth",
+   "dateofbirth": "dateOfBirth",
+   "date": "dateOfBirth",
+   "resultkey": "resultKey",
+   "result_key": "resultKey",
+   "user_id": "resultKey",
+   "userid": "resultKey",
+   "request_id": "resultKey",
+   "response_id": "resultKey",
+   "terms": "termsConditions",
+   "termsconditions": "termsConditions",
+   "terms_conditions": "termsConditions",
+   "organisation": "organization",
+   "organization": "organization",
+   "address1": "address1",
+   "address2": "address2",
+   "city": "city",
+   "country": "country",
+   "state": "state",
+   "zipcode": "zipCode",
+   "zip": "zipCode",
+   "zip_code": "zipCode",
+   "website": "website"
+ },
+ "answer_key_to_question": {
+   "who": "Q1. Who are you purchasing for?",
+   "gender": "Q2. Gender",
+   "occasion": "Q4. Occasion",
+   "purpose": "Q5. Purpose",
+   "profession": "Q3. Profession"
+ }
 }
- 
