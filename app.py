@@ -1,12 +1,26 @@
+import os
+
+import json
+
+import logging
+
+from typing import Any, Dict, List, Optional
+
 from fastapi import FastAPI, Request, HTTPException
 
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import PlainTextResponse, JSONResponse
 
-import os, json, xmltodict, httpx
+import httpx
+
+import xml.etree.ElementTree as ET
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+log = logging.getLogger("adapter")
 
 app = FastAPI(title="Ring Style Adapter", version="2.1.0")
 
-# --- config / helpers ---------------------------------------------------------
+# --- Env ---
 
 BACKEND_POST_URL = os.getenv("BACKEND_POST_URL", "").strip()
 
@@ -14,189 +28,255 @@ BACKEND_GET_URL  = os.getenv("BACKEND_GET_URL", "").strip()
 
 API_KEY_REQUIRED = os.getenv("API_KEY_REQUIRED", "false").lower() == "true"
 
-API_KEY          = os.getenv("API_KEY", "").strip()
+API_KEY_HEADER   = os.getenv("API_KEY", "").strip()
 
-def _json_safe(obj):
+# --- Load mapping.config.json (shipped alongside app.py) ---
 
-    try:
+CFG_PATH = os.path.join(os.path.dirname(__file__), "mapping.config.json")
 
-        json.dumps(obj)
+try:
 
-        return obj
+    with open(CFG_PATH, "r", encoding="utf-8") as f:
 
-    except Exception:
+        CFG: Dict[str, Any] = json.load(f)
 
-        return {"raw": str(obj)}
+except Exception as e:
 
-def _map_incoming(payload: dict) -> dict:
+    log.error("Failed to load mapping.config.json: %s", e)
+
+    CFG = {}
+
+# ---------------------------
+
+# Helpers
+
+# ---------------------------
+
+def _dig(d: Dict[str, Any], path: Optional[str]) -> Any:
+
+    """Safely get nested value via dotted path."""
+
+    if not path:
+
+        return d
+
+    cur: Any = d
+
+    for key in path.split("."):
+
+        if isinstance(cur, dict) and key in cur:
+
+            cur = cur[key]
+
+        else:
+
+            return None
+
+    return cur
+
+def _xml_text(elem: Optional[ET.Element]) -> str:
+
+    return elem.text if elem is not None and elem.text is not None else ""
+
+def ensure_xml(value: str) -> str:
+
+    # Minimal escaping for XML text nodes
+
+    return (value or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def make_backend_xml(payload: Dict[str, Any]) -> str:
 
     """
 
-    Very simple example mapper that matches the sample you shared.
-
-    Replace/extend this with your existing mapping logic if needed.
+    Build the XML the backend expects:
+<root>
+<request_id>...</request_id>
+<full_name>...</full_name>
+<email>...</email>
+<phone_number>...</phone_number>
+<birth_date>...</birth_date>
+<questionAnswers>
+<question><id>..</id><value>..</value></question>*
+</questionAnswers>
+</root>
 
     """
 
-    # Expecting:
+    mapping = CFG.get("mapping", {})
 
-    # {
+    fields_map: Dict[str, Any] = mapping.get("fields", {})
 
-    #   "sessionId": "...",
+    answers_path: str = mapping.get("answers_path", "answers")
 
-    #   "customer": {"name": "...", "mobile": "..."},
+    answer_id_key: str = mapping.get("answer_id_key", "id")
 
-    #   "answers": [{"id":"q1_style","value":"..."}, ...]
+    answer_val_key: str = mapping.get("answer_value_key", "value")
 
-    # }
+    # 1) Pull top‑level fields safely (with defaults)
 
-    answers = {a.get("id"): a.get("value") for a in payload.get("answers", [])}
+    request_id = _dig(payload, fields_map.get("request_id", {}).get("from", "sessionId")) or ""
 
-    return {
+    full_name  = _dig(payload, fields_map.get("full_name", {}).get("from", "customer.name")) or ""
 
-        "session_id": payload.get("sessionId"),
+    email      = _dig(payload, fields_map.get("email", {}).get("from", "")) or ""
 
-        "customer": {
+    phone      = _dig(payload, fields_map.get("phone_number", {}).get("from", "customer.mobile")) or ""
 
-            "name":   payload.get("customer", {}).get("name"),
+    birth_date = _dig(payload, fields_map.get("birth_date", {}).get("from", "")) or ""
 
-            "mobile": payload.get("customer", {}).get("mobile"),
+    # 2) Build QnA list
 
-        },
+    answers_raw = _dig(payload, answers_path) or []
 
-        "preferences": {
+    qna: List[Dict[str, str]] = []
 
-            "style":      answers.get("q1_style"),
+    if isinstance(answers_raw, list):
 
-            "metal":      (answers.get("q2_metal") or "").lower() or None,
+        for a in answers_raw:
 
-            "budget":     int(answers["q3_budget"]) if str(answers.get("q3_budget", "")).isdigit() else None,
+            qid = (a or {}).get(answer_id_key, "")
 
-            "ring_size":  answers.get("q4_size"),
+            val = (a or {}).get(answer_val_key, "")
 
-            "profile":    answers.get("q5_profile"),
+            if qid != "" or val != "":
 
-        }
+                qna.append({"id": str(qid), "value": str(val)})
 
-    }
+    # 3) Compose XML
 
-def _forward_headers(req: Request) -> dict:
+    root = ET.Element("root")
 
-    # Start from client Accept, default to JSON
+    ET.SubElement(root, "request_id").text   = request_id
 
-    accept = req.headers.get("accept", "application/json")
+    ET.SubElement(root, "full_name").text    = full_name
 
-    headers = {"Accept": accept}
+    ET.SubElement(root, "email").text        = email
 
-    if API_KEY_REQUIRED and API_KEY:
+    ET.SubElement(root, "phone_number").text = phone
 
-        headers["x-api-key"] = API_KEY
+    ET.SubElement(root, "birth_date").text   = birth_date
 
-    return headers
+    qa_root = ET.SubElement(root, "questionAnswers")
 
-# --- endpoints ----------------------------------------------------------------
+    for item in qna:
 
-@app.post("/adapter")
+        q = ET.SubElement(qa_root, "question")
 
-async def adapter_adapter(request: Request):
+        ET.SubElement(q, "id").text    = item["id"]
+
+        ET.SubElement(q, "value").text = item["value"]
+
+    # Serialize compact XML string
+
+    xml_bytes = ET.tostring(root, encoding="utf-8")
+
+    return xml_bytes.decode("utf-8")
+
+async def forward_to_backend(xml_payload: str) -> httpx.Response:
 
     if not BACKEND_POST_URL:
 
         raise HTTPException(status_code=500, detail="BACKEND_POST_URL is not configured.")
 
-    # 1) Parse inbound (JSON or XML)
+    headers = {
 
-    content_type = request.headers.get("content-type", "").lower()
+        "Content-Type": "application/xml",
+
+        "Accept": "application/json",
+
+    }
+
+    if API_KEY_REQUIRED and API_KEY_HEADER:
+
+        headers["x-api-key"] = API_KEY_HEADER
+
+    timeout = httpx.Timeout(CFG.get("forward", {}).get("timeout_sec", 30.0))
+
+    async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+
+        return await client.post(BACKEND_POST_URL, content=xml_payload.encode("utf-8"), headers=headers)
+
+# ---------------------------
+
+# Routes
+
+# ---------------------------
+
+@app.get("/", response_class=PlainTextResponse)
+
+async def root():
+
+    return "Ring Style Adapter OK"
+
+@app.get("/ping", response_class=PlainTextResponse)
+
+async def ping():
+
+    return "pong"
+
+@app.post("/adapter")
+
+async def adapter(request: Request):
+
+    """
+
+    Accepts JSON (preferred) or XML.
+
+    - If JSON: map to backend XML using mapping.config.json and forward.
+
+    - If XML: pass through to backend (but still ensure the required tags exist).
+
+    """
+
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
 
     try:
 
-        if "xml" in content_type:
+        if ctype == "application/json":
+
+            body: Dict[str, Any] = await request.json()
+
+            xml_payload = make_backend_xml(body)
+
+        elif ctype in ("application/xml", "text/xml"):
+
+            # Pass‑through but make sure it is valid XML
 
             raw = await request.body()
 
-            incoming = xmltodict.parse(raw)
+            try:
 
-            # If your XML has a root, adjust extraction here
+                # Validate / normalize
+
+                _ = ET.fromstring(raw.decode("utf-8"))
+
+                xml_payload = raw.decode("utf-8")
+
+            except ET.ParseError as e:
+
+                raise HTTPException(status_code=400, detail=f"Invalid XML: {e}")
 
         else:
 
-            incoming = await request.json()
+            raise HTTPException(status_code=415, detail="Unsupported Content-Type. Use application/json or application/xml.")
+
+        log.info("Forwarding mapped XML to backend (%d bytes)", len(xml_payload))
+
+        resp = await forward_to_backend(xml_payload)
+
+        # Mirror backend response (assumed JSON)
+
+        return JSONResponse(status_code=resp.status_code, content=resp.json() if resp.content else {})
+
+    except HTTPException:
+
+        raise
 
     except Exception as e:
 
-        raise HTTPException(status_code=400, detail=f"Invalid request body: {e}")
+        log.exception("Adapter error")
 
-    # 2) Map inbound to backend schema
-
-    try:
-
-        backend_payload = _map_incoming(incoming)
-
-    except Exception as e:
-
-        raise HTTPException(status_code=400, detail=f"Mapping error: {e}")
-
-    # 3) POST to backend (never overwrite the HTTP response object)
-
-    timeout = httpx.Timeout(float(os.getenv("FORWARD_TIMEOUT", "30")))
-
-    f_headers = _forward_headers(request)
-
-    try:
-
-        async with httpx.AsyncClient(timeout=timeout) as client:
-
-            resp = await client.post(
-
-                BACKEND_POST_URL,
-
-                json=backend_payload,
-
-                headers=f_headers,
-
-            )
-
-    except httpx.RequestError as e:
-
-        # Network / DNS / TLS errors
-
-        raise HTTPException(status_code=502, detail=f"Backend not reachable: {e}") from e
-
-    # Keep raw response values for diagnostics
-
-    status_code = resp.status_code
-
-    raw_text    = resp.text
-
-    # 4) Try to parse backend JSON; fall back to raw text
-
-    try:
-
-        backend_json = resp.json()
-
-    except Exception:
-
-        backend_json = {"raw": raw_text}
-
-    # 5) (Optional) map backend_json to outward schema.
-
-    # For now, just mirror what backend returned.
-
-    outward = _json_safe(backend_json)
-
-    # 6) Mirror client Accept (default JSON)
-
-    accept = request.headers.get("accept", "application/json").lower()
-
-    if "xml" in accept:
-
-        # If you actually need XML outward, convert here
-
-        # and return PlainTextResponse with 'application/xml'
-
-        xml_str = xmltodict.unparse({"BackendResponse": outward}, pretty=True)
-
-        return PlainTextResponse(xml_str, status_code=status_code, media_type="application/xml")
-
-    return JSONResponse(outward, status_code=status_code)
+        raise HTTPException(status_code=500, detail=f"Adapter error: {e}")
+log.info
+This domain may be for sale!
  
