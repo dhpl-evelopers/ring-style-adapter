@@ -1,17 +1,37 @@
 {
  "forward": {
    "timeout_sec": 30,
-   "headers": { "Accept": "application/json" }
- },
- "mapping": {
-   "answers_path": "answers",
-   "fields": {
-     "request_id":   { "from": "sessionId" },
-     "full_name":    { "from": "customer.name" },
-     "email":        { "from": "customer.email", "default": "" },
-     "phone_number": { "from": "customer.mobile" },
-     "birth_date":   { "from": "customer.birth_date", "default": "" }
+   "headers": {
+     "Accept": "application/json"
    }
  },
- "response": { "type": "json" }
+ "mapping": {
+   "source_root": null,
+   "fields": {
+     "name":         { "from": "customer.name" },
+     "email":        { "from": "customer.email", "default": "" },
+     "phone_number": { "from": "customer.mobile" },
+     "birth_date":   { "from": "customer.birth_date", "default": "" },
+     "request_id":   { "from": "sessionId" }
+   },
+   "answers_path": "answers",
+   "questions": [
+     { "key": "q1_style",   "text": "Who are you purchasing for?" },
+     { "key": "q2_metal",   "text": "Gender" },
+     { "key": "q3_budget",  "text": "Profession" },
+     { "key": "q4_size",    "text": "Purpose" },
+     { "key": "q5_profile", "text": "How do you describe your typical day?" },
+     { "key": "q6_weekend", "text": "How do you prefer to spend your weekends?" },
+     { "key": "q7_work",    "text": "How do you typically dress for work?" },
+     { "key": "q8_events",  "text": "What would you typically wear for social events?" },
+     { "key": "q9_party",   "text": "Are you an introvert or an extrovert?" },
+     { "key": "q10_lounge", "text": "Have you shopped in a long time?" },
+     { "key": "q11_emerg",  "text": "Your mother is not feeling well & you have an important meeting to drive" },
+     { "key": "q_last_min", "text": "Last minute plans?" }
+   ]
+ },
+ "response": {
+   "type": "json",
+   "xml_root": "BackendResponse"
+ }
 }
