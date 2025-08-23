@@ -1,172 +1,356 @@
-import os, json, time
-from typing import Dict, Any, List
+import os, json, re
+
+from typing import Dict, Any, Tuple
+
 from flask import Flask, request, jsonify
+
 import requests
-from xml.sax.saxutils import escape
-from flask import Flask
-from asgiref.wsgi import WsgiToAsgi
 
-flask_app = Flask(__name__)
-# ... routes on flask_app ...
-app = WsgiToAsgi(flask_app)  # ASGI app for Uvicorn
-# --- config from env ---
-BACKEND_BASE_URL = os.environ.get("BACKEND_BASE_URL", "").rstrip("/")
-CREATE_PATH = os.environ.get("BACKEND_CREATE_PATH", "/CreateRequest")
-FETCH_PATH  = os.environ.get("BACKEND_FETCH_PATH",  "/fetchResponse")
-TIMEOUT_SEC = int(os.environ.get("BACKEND_TIMEOUT_SEC", "25"))
-MAPPING_PATH = os.environ.get("MAPPING_PATH", "/home/site/wwwroot/mapping.config.json")
-# --- load mapping on startup ---
-def load_mapping() -> Dict[str, Any]:
-   with open(MAPPING_PATH, "r", encoding="utf-8") as f:
-       return json.load(f)
-_MAPPING = load_mapping()
-REQUIRED_USER_FIELDS = ["full_name", "email", "phone_number", "birth_date", "result_key"]
+# ---------------- ENV ----------------
 
-def _find_question_key_by_label(label: str) -> str | None:
-   """Resolve incoming question text to mapping key (q1_xxx)."""
-   if not label:
-       return None
-   label_norm = label.strip().lower()
-   for qkey, qdef in _mapping_questions().items():
-       labels = [qdef.get("canonical_label", "")] + qdef.get("labels", [])
-       for l in labels:
-           if l and l.strip().lower() == label_norm:
-               return qkey
-   return None
+BASE_URL   = os.getenv("BACKEND_BASE_URL", "").rstrip("/")
 
-def _mapping_questions() -> Dict[str, Any]:
-   return _MAPPING.get("questions", {})
+CREATE_P   = os.getenv("BACKEND_CREATE_PATH", "/createRequest")
 
-def _normalize_answer(qkey: str, incoming_text: str) -> Dict[str, str]:
-   """
-   Given a mapping question key and the user's UI answer text,
-   return a dict with 'answer_text' (UI) and 'backend_value' (canonical for backend).
-   Free-text questions just echo the text for backend_value.
-   """
-   qdef = _mapping_questions().get(qkey, {})
-   opts: List[Dict[str, str]] = qdef.get("options", [])
-   # if options exist, try to map to backend_key
-   if opts:
-       tnorm = (incoming_text or "").strip().lower()
-       for opt in opts:
-           if (opt.get("text","").strip().lower() == tnorm) or (opt.get("backend_key","").strip().lower() == tnorm):
-               return {"answer_text": opt.get("text",""), "backend_value": opt.get("backend_key", opt.get("text",""))}
-       # not found -> keep text, backend will likely reject; better to pass the UI text
-       return {"answer_text": incoming_text, "backend_value": incoming_text}
-   else:
-       # free text
-       return {"answer_text": incoming_text, "backend_value": incoming_text}
+FETCH_P    = os.getenv("BACKEND_FETCH_PATH", "/fetchResponse")
 
-def _build_backend_xml(payload: Dict[str, Any], normalized: List[Dict[str, Any]]) -> str:
-   """
-   Make the XML the backend expects, like the one in your working logs.
-   """
-   # Required header fields
-   full_name = escape(payload["full_name"])
-   email     = escape(payload["email"])
-   phone     = escape(payload["phone_number"])
-   dob       = escape(payload["birth_date"])
-   req_id    = escape(payload["request_id"])
-   res_key   = escape(payload["result_key"])
-   # Questions & Answers
-   qa_xml_parts = []
-   for item in normalized:
-       qtext = escape(item["question"])
-       aval  = escape(item["backend_value"])
-       qa_xml_parts.append(f"<QA><Question>{qtext}</Question><Answer>{aval}</Answer></QA>")
-   qa_xml = "".join(qa_xml_parts)
-   # The backend response you showed uses this shape:
-   return (
-       f"<Request>"
-       f"<RequestID>{req_id}</RequestID>"
-       f"<ResultKey>{res_key}</ResultKey>"
-       f"<FullName>{full_name}</FullName>"
-       f"<Email>{email}</Email>"
-       f"<PhoneNumber>{phone}</PhoneNumber>"
-       f"<DateOfBirth>{dob}</DateOfBirth>"
-       f"<QuestionAnswers>{qa_xml}</QuestionAnswers>"
-       f"</Request>"
-   )
+TIMEOUT_S  = int(os.getenv("BACKEND_TIMEOUT_SEC", "30"))
 
-def _post_create_request(xml_body: str) -> str:
-   if not BACKEND_BASE_URL:
-       raise RuntimeError("BACKEND_URL is not configured")
-   url = f"{BACKEND_BASE_URL}{CREATE_PATH}"
-   r = requests.post(url, data=xml_body.encode("utf-8"), headers={"Content-Type": "application/xml"}, timeout=TIMEOUT_SEC)
-   r.raise_for_status()
-   # assume backend returns a plain id or a small JSON/XML; try both
-   try:
-       j = r.json()
-       return j.get("response_id") or j.get("id") or j.get("ResponseId") or ""
-   except Exception:
-       # fallback: text
-       return r.text.strip()
+MAP_PATH   = os.getenv("MAPPING_PATH") or os.path.join(os.path.dirname(__file__), "mapping.config.json")
 
-def _get_fetch_response(response_id: str) -> str:
-   url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
-   r = requests.get(url, params={"response_id": response_id}, timeout=TIMEOUT_SEC)
-   r.raise_for_status()
-   return r.text
+app = Flask(__name__)
+
+# ---------------- mapping ----------------
+
+with open(MAP_PATH, "r", encoding="utf-8") as f:
+
+    MAPPING = json.load(f)
+
+def _norm(s: str) -> str:
+
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+# id/label -> canonical key
+
+_ID2KEY = {
+
+    "q1":"q1_purchasing_for","q1b":"q1b_relation","q2":"q2_gender","q3":"q3_profession",
+
+    "q4":"q4_occasion","q5":"q5_purpose","q6":"q6_day","q7":"q7_weekend","q8":"q8_work_dress",
+
+    "q9":"q9_social_dress","q10":"q10_waiting_line","q11":"q11_artwork",
+
+    "q12":"q12_meeting_mother_unwell","q13":"q13_last_minute_plans"
+
+}
+
+def find_question_key(qid_or_text: str) -> str:
+
+    s = (qid_or_text or "").strip()
+
+    s_norm = _norm(s)
+
+    if s_norm in _ID2KEY:
+
+        return _ID2KEY[s_norm]
+
+    for key, meta in MAPPING["questions"].items():
+
+        labels = [meta.get("canonical_label","")] + meta.get("labels", [])
+
+        if any(_norm(lbl) == s_norm for lbl in labels):
+
+            return key
+
+    return ""
+
+def map_answer_to_backend(key: str, answer_text: str) -> Tuple[str, Any]:
+
+    meta = MAPPING["questions"].get(key, {})
+
+    backend_ids = meta.get("backend_ids", {})
+
+    for opt, opt_id in backend_ids.items():
+
+        if _norm(opt) == _norm(answer_text):
+
+            return ("id", opt_id)
+
+    return ("text", answer_text)
+
+def require_keys(payload: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+
+    missing = []
+
+    must = list(MAPPING.get("must_have_questions_keys", []))
+
+    # conditional relation if purchasing for Others
+
+    if payload.get("q1_purchasing_for", {}).get("answer_text", "").lower() == "others":
+
+        if "q1b_relation" not in payload:
+
+            missing.append("q1b_relation")
+
+    for k in must:
+
+        if k not in payload:
+
+            missing.append(k)
+
+    return (not missing, {"missing_keys": missing})
+
+def xml_escape(s: str) -> str:
+
+    return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+def build_backend_xml(meta: Dict[str, Any], normalized: Dict[str, Any]) -> str:
+
+    parts = []
+
+    parts.append("<Request>")
+
+    parts.append(f"<RequestId>{xml_escape(meta.get('request_id',''))}</RequestId>")
+
+    parts.append(f"<ResultKey>{xml_escape(meta.get('result_key',''))}</ResultKey>")
+
+    parts.append(f"<FullName>{xml_escape(meta.get('full_name',''))}</FullName>")
+
+    parts.append(f"<Email>{xml_escape(meta.get('email',''))}</Email>")
+
+    parts.append(f"<PhoneNumber>{xml_escape(meta.get('phone_number',''))}</PhoneNumber>")
+
+    parts.append(f"<DateOfBirth>{xml_escape(meta.get('birth_date',''))}</DateOfBirth>")
+
+    parts.append("<QuestionAnswers>")
+
+    order = [
+
+      "q1_purchasing_for","q1b_relation","q2_gender","q3_profession","q4_occasion","q5_purpose",
+
+      "q6_day","q7_weekend","q8_work_dress","q9_social_dress",
+
+      "q10_waiting_line","q11_artwork","q12_meeting_mother_unwell","q13_last_minute_plans"
+
+    ]
+
+    for key in order:
+
+        if key not in normalized: 
+
+            continue
+
+        q = MAPPING["questions"][key]["canonical_label"]
+
+        a = normalized[key]
+
+        parts.append("<QA>")
+
+        parts.append(f"<Question>{xml_escape(q)}</Question>")
+
+        if a["kind"] == "id":
+
+            parts.append(f"<SelectedOptionId>{a['answer_id']}</SelectedOptionId>")
+
+        parts.append(f"<Answer>{xml_escape(a.get('answer_text',''))}</Answer>")
+
+        parts.append("</QA>")
+
+    parts.append("</QuestionAnswers>")
+
+    parts.append("</Request>")
+
+    return "".join(parts)
 
 @app.post("/adapter")
+
 def adapter():
-   try:
-       payload = request.get_json(force=True)
-   except Exception:
-       return jsonify({"error": "Invalid JSON"}), 400
-   # Validate user fields
-   missing = [k for k in REQUIRED_USER_FIELDS if not str(payload.get(k, "")).strip()]
-   if missing:
-       return jsonify({"error": "Missing required fields", "missing": missing}), 400
-   # Normalize Q&A
-   incoming_qas: List[Dict[str, str]] = payload.get("questionAnswers", [])
-   if not isinstance(incoming_qas, list):
-       return jsonify({"error": "questionAnswers must be a list"}), 400
-   normalized: List[Dict[str, Any]] = []
-   missing_keys: List[str] = []
-   must_have = set(_MAPPING.get("must_have_questions_keys", []))
-   for qa in incoming_qas:
-       question_text = (qa.get("question") or qa.get("id") or "").strip()
-       answer_text   = (qa.get("answer") or "").strip()
-       if not question_text:
-           # skip blanks
-           continue
-       qkey = _find_question_key_by_label(question_text)
-       if not qkey:
-           if not _MAPPING.get("allow_unknown_questions", True):
-               continue
-           # pass through unknown questions as free text
-           backend_value = answer_text
-           normalized.append({
-               "qkey": "unknown",
-               "question": question_text,
-               "answer_text": answer_text,
-               "backend_value": backend_value
-           })
-           continue
-       # map answer
-       ans = _normalize_answer(qkey, answer_text)
-       normalized.append({
-           "qkey": qkey,
-           "question": question_text,
-           "answer_text": ans["answer_text"],
-           "backend_value": ans["backend_value"]
-       })
-       if qkey in must_have:
-           must_have.remove(qkey)
-   if must_have:
-       # tell the UI exactly which logical keys are missing
-       return jsonify({"error": "Mandatory questions missing", "missing_keys": sorted(must_have)}), 400
-   # Build XML and call backend
-   xml_body = _build_backend_xml(payload, normalized)
-   response_id = _post_create_request(xml_body)
-   # short poll (single fetch; your backend looked synchronous)
-   backend_response = _get_fetch_response(response_id) if response_id else ""
-   return jsonify({
-       "status": "ok",
-       "request_id": payload["request_id"],
-       "result_key": payload["result_key"],
-       "normalized": normalized,
-       "response_id": response_id,
-       "backend_response": backend_response
-   })
+
+    body = request.get_json(force=True, silent=True) or {}
+
+    meta = {
+
+        "full_name":   body.get("full_name") or body.get("name") or "",
+
+        "email":       body.get("email",""),
+
+        "phone_number":body.get("phone_number",""),
+
+        "birth_date":  body.get("birth_date",""),
+
+        "request_id":  body.get("request_id",""),
+
+        "result_key":  body.get("result_key",""),
+
+        "test_mode":   body.get("test_mode","live")
+
+    }
+
+    incoming = body.get("questionAnswers") or body.get("question_answers") or []
+
+    normalized = {}
+
+    for item in incoming:
+
+        qkey = ""
+
+        if "id" in item:
+
+            qkey = find_question_key(str(item["id"]))
+
+        elif "question" in item:
+
+            qkey = find_question_key(str(item["question"]))
+
+        if not qkey:
+
+            if not MAPPING.get("allow_unknown_questions", True):
+
+                continue
+
+            else:
+
+                # unknown questions are ignored (or you can pass-through in XML if needed)
+
+                continue
+
+        answer_text = str(item.get("answer","")).strip()
+
+        kind, mapped = map_answer_to_backend(qkey, answer_text)
+
+        if kind == "id":
+
+            normalized[qkey] = {"kind": "id", "answer_id": mapped, "answer_text": answer_text}
+
+        else:
+
+            normalized[qkey] = {"kind": "text", "answer_text": mapped}
+
+    ok, info = require_keys(normalized)
+
+    if not ok:
+
+        return jsonify({"error":"Mandatory questions missing", **info}), 400
+
+    xml = build_backend_xml(meta, normalized)
+
+    if not BASE_URL:
+
+        return jsonify({"details":"BACKEND_BASE_URL is not configured", "preview_xml": xml}), 500
+
+    create_url = f"{BASE_URL}{CREATE_P}"
+
+    fetch_url  = f"{BASE_URL}{FETCH_P}"
+
+    try:
+
+        # ---------- CREATE ----------
+
+        c_headers = {"Content-Type": "application/xml"}
+
+        c_resp = requests.post(create_url, data=xml.encode("utf-8"), headers=c_headers, timeout=TIMEOUT_S)
+
+        response_id = None
+
+        try:
+
+            cj = c_resp.json()
+
+            # try several common keys; fallback to None
+
+            response_id = cj.get("response_id") or cj.get("id") or cj.get("responseId")
+
+        except Exception:
+
+            pass
+
+        # ---------- FETCH ----------
+
+        # Prefer GET with either response_id or request_id/result_key
+
+        params = {}
+
+        if response_id:
+
+            params["response_id"] = response_id
+
+        else:
+
+            # best-effort generic params
+
+            if meta["request_id"]: params["request_id"] = meta["request_id"]
+
+            if meta["result_key"]: params["result_key"] = meta["result_key"]
+
+        f_status = None
+
+        f_text   = None
+
+        # Try GET first
+
+        try:
+
+            f_resp = requests.get(fetch_url, params=params, timeout=TIMEOUT_S)
+
+            f_status, f_text = f_resp.status_code, f_resp.text
+
+            # If backend doesn’t support GET or returns non-OK, try POST as fallback
+
+            if f_status >= 400:
+
+                raise RuntimeError(f"GET fetch returned {f_status}")
+
+        except Exception:
+
+            try:
+
+                f_resp = requests.post(fetch_url, json=params, timeout=TIMEOUT_S)
+
+                f_status, f_text = f_resp.status_code, f_resp.text
+
+            except Exception as e:
+
+                f_status, f_text = None, f"fetch failed: {e}"
+
+        return jsonify({
+
+            "status": "ok",
+
+            "request_id": meta["request_id"],
+
+            "result_key": meta["result_key"],
+
+            "normalized": normalized,
+
+            "preview_xml": xml,
+
+            "backend": {
+
+                "create_url": create_url,
+
+                "create_status": c_resp.status_code,
+
+                "create_text": c_resp.text[:4000],
+
+                "fetch_url": fetch_url,
+
+                "fetch_params": params,
+
+                "fetch_status": f_status,
+
+                "fetch_text": (f_text or "")[:4000]
+
+            }
+
+        }), 200
+
+    except Exception as e:
+
+        return jsonify({"error":"Backend call failed", "message": str(e), "preview_xml": xml}), 502
+
+@app.get("/healthz")
+
+def health():
+
+    return {"ok": True}
+ 
