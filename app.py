@@ -155,21 +155,25 @@ def validate_and_normalize(payload: Dict[str, Any], mapping: Mapping) -> Tuple[D
     return user_meta, normalized
 
 def to_backend_xml(user_meta: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
-    req = Element("Request")
-    SubElement(req, "RequestId").text   = user_meta.get("request_id", "")
-    SubElement(req, "ResultKey").text   = user_meta.get("result_key", "")
-    SubElement(req, "FullName").text    = user_meta.get("full_name", "")
-    SubElement(req, "Email").text       = user_meta.get("email", "")
-    SubElement(req, "PhoneNumber").text = user_meta.get("phone_number", "")
-    SubElement(req, "DateOfBirth").text = user_meta.get("birth_date", "")
+    from xml.etree.ElementTree import Element, SubElement, tostring
 
-    qas_root = SubElement(req, "QuestionAnswers")
+    req = Element("request")
+
+    SubElement(req, "request_id").text   = user_meta.get("request_id", "")
+    SubElement(req, "result_key").text   = user_meta.get("result_key", "")
+    SubElement(req, "full_name").text    = user_meta.get("full_name", "")
+    SubElement(req, "email").text        = user_meta.get("email", "")
+    SubElement(req, "phone_number").text = user_meta.get("phone_number", "")
+    SubElement(req, "date_of_birth").text= user_meta.get("birth_date", "")
+
+    qas_root = SubElement(req, "question_answers")
     for qa in qas:
-        qa_el = SubElement(qas_root, "QA")
-        SubElement(qa_el, "Question").text = qa["question_text"]
-        SubElement(qa_el, "Answer").text   = qa["answer_text"]
+        qa_el = SubElement(qas_root, "qa")
+        SubElement(qa_el, "question").text = qa["question_text"]
+        SubElement(qa_el, "answer").text   = qa["answer_text"]
 
     return tostring(req, encoding="unicode")
+
 
 def call_backend(xml_body: str, test_mode: str) -> Dict[str, Any]:
     if not BACKEND_BASE_URL:
@@ -196,7 +200,7 @@ def call_backend(xml_body: str, test_mode: str) -> Dict[str, Any]:
     last_data = None
 
     while time.time() < deadline:
-        r = requests.get(fetch_url, params={"responseId": response_id}, timeout=BACKEND_TIMEOUT_S)
+        r = requests.get(fetch_url, params={"response_id": response_id}, timeout=BACKEND_TIMEOUT_S)
         if r.status_code >= 400:
             raise RuntimeError(f"Backend fetchResponse failed: {r.status_code} {r.text}")
         try:
