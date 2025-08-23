@@ -22,13 +22,7 @@
 
       "question": "Profession",
 
-      "allowed": [
-
-        "Designer","Engineer","Doctor","Lawyer","Photographer","Teacher",
-
-        "Student","Entrepreneur","Consultant","Finance","Sales","Other"
-
-      ]
+      "allowed": ["Designer", "Engineer", "Doctor", "Lawyer", "Photographer", "Teacher", "Student", "Entrepreneur", "Consultant", "Finance", "Sales", "Other"]
 
     },
 
@@ -36,13 +30,7 @@
 
       "question": "Occasion",
 
-      "allowed": [
-
-        "Daily wear","Work","College","Anniversary","Birthday",
-
-        "Engagement","Wedding","Festive","Party","Gifting","Other"
-
-      ]
+      "allowed": ["Engagement", "Anniversary", "Wedding", "Birthday", "Casual", "Other"]
 
     },
 
@@ -50,13 +38,7 @@
 
       "question": "Purpose",
 
-      "allowed": [
-
-        "Everyday essential","Statement piece","Gift","Heirloom",
-
-        "Investment","Casual wear","Work wear","Other"
-
-      ]
+      "allowed": ["Daily wear", "Office wear", "Party wear", "Special occasions"]
 
     },
 
@@ -64,11 +46,7 @@
 
       "question": "How would you describe your typical day?",
 
-      "allowed": [
-
-        "Structured & planned","Balanced","Spontaneous & flexible"
-
-      ]
+      "allowed": ["Hustle to build out of your passion", "Structured 9-5 routine", "Balanced work and personal life", "Spontaneous & Free Spirited"]
 
     },
 
@@ -76,13 +54,7 @@
 
       "question": "How do you prefer to spend your weekends?",
 
-      "allowed": [
-
-        "At home / relaxing","Going out & socialising","Short getaways",
-
-        "Hobbies & fitness","Family time"
-
-      ]
+      "allowed": ["Relaxing at home", "Spending time with family", "Going out & socialising", "Travel & Adventure"]
 
     },
 
@@ -90,11 +62,7 @@
 
       "question": "How do you typically dress for work?",
 
-      "allowed": [
-
-        "Formal","Business casual","Smart casual","Casual","Uniform"
-
-      ]
+      "allowed": ["Business Formals: Tie-Suit / Skirt Blazer", "Business Casuals: Shirt-Trousers / Formal dress", "Smart Casuals: Jeans + Blazer", "Creative / Flexible dress code"]
 
     },
 
@@ -102,13 +70,7 @@
 
       "question": "How do you typically dress for social events?",
 
-      "allowed": [
-
-        "Classic & elegant","Stylish & chic","Minimalist",
-
-        "Bold / experimental","Traditional / ethnic"
-
-      ]
+      "allowed": ["Stylish & Chic: Designer Clothing", "Casual yet Trendy", "Traditional & Elegant", "Minimalist"]
 
     },
 
@@ -116,57 +78,51 @@
 
       "question": "You are waiting in a long line, what do you do?",
 
-      "allowed": [
-
-        "Wait patiently","Look for a quicker option","Multitask while waiting",
-
-        "Leave and come back later"
-
-      ]
+      "allowed": ["Talk to people around", "Quietly wait and observe", "Check your phone", "Leave if it takes too long"]
 
     },
 
     "Q11": {
 
-      "question": "Whenever you see a painting, what do you imagine yourself as?",
+      "question": "Whenever you see a painting, what do you notice first?",
 
-      "allowed": [
-
-        "Artist","Curator","Collector","Critic","Observer"
-
-      ]
+      "allowed": ["The colors & vibe", "The details & strokes", "The meaning/story behind it", "How it makes me feel"]
 
     },
 
     "Q12": {
 
-      "question": "Your mother is not feeling well & you have an important meeting to drive, what will you do?",
+      "question": "Your mother is not feeling well & you have an important meeting to drive, what would you do?",
 
-      "allowed": [
-
-        "Reschedule meeting","Attend meeting & check regularly",
-
-        "Ask sibling/family to help","Work from home","Cancel meeting"
-
-      ]
+      "allowed": ["Reschedule the meeting", "Ask someone to accompany her", "Take her myself & postpone work", "Balance both as best as I can"]
 
     },
 
     "Q13": {
 
-      "question": "Last minute plans, how do you respond?",
+      "question": "Last minute plans — how do you handle them?",
 
-      "allowed": [
-
-        "Plan ahead / avoid","Go with the flow","Join if convenient",
-
-        "Prefer to host instead"
-
-      ]
+      "allowed": ["Always up for it!", "Depends on my schedule", "Not a fan of unplanned things", "I will go with the flow!"]
 
     }
+
+  },
+
+  "defaults": {
+
+    "full_name": "",
+
+    "email": "",
+
+    "phone_number": "",
+
+    "birth_date": "",
+
+    "request_id": "",
+
+    "result_key": ""
 
   }
 
 }
- 
+
