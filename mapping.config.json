@@ -1,146 +1,490 @@
 {
- "allow_unknown_questions": true,
- "must_have_questions_keys": [
-   "q1_purchasing_for",
-   "q2_gender",
-   "q3_profession",
-   "q4_occasion",
-   "q5_purpose",
-   "q6_day",
-   "q7_weekend",
-   "q8_work_dress",
-   "q9_social_dress",
-   "q10_waiting_line",
-   "q11_artwork",
-   "q12_meeting_mother_unwell",
-   "q13_last_minute_plans"
- ],
- "questions": {
-   "q1_purchasing_for": {
-     "canonical_label": "Who are you purchasing for?",
-     "labels": ["Who are you purchasing for?", "Who are you purchasing the ring for?", "Purchasing for", "Buying for", "Q1"],
-     "options": ["Self", "Others"],
-     "backend_ids": { "Self": 299504, "Others": 299505 }
-   },
-   "q1b_relation": {
-     "canonical_label": "Your relation to the person you are buying for",
-     "labels": ["Your relation to the person you are buying for", "Relation", "Relation to the person", "Q1B", "q1b_relation"],
-     "options": ["Wife","Mother","Father","Sister","Girlfriend","Husband","Boyfriend","Brother","Mother in Law","Father in Law","Friend"]
-   },
-   "q2_gender": {
-     "canonical_label": "Gender",
-     "labels": ["Gender", "Gender of the person you are buying for", "Q2"],
-     "options": ["Male","Female"],
-     "backend_ids": { "Female": 299507, "Male": 299506 }
-   },
-   "q3_profession": {
-     "canonical_label": "Profession",
-     "labels": ["Profession", "His Profession", "Her Profession", "Q3"],
-     "options": [
-       "Knowledge Based: IT/ Marketing/ Architect/ Lawyer/ Teacher/ Accountant",
-       "Skill Based/Manual: Home-maker/ Baker/ Make-up Artist/ Graphics & VFX/ Photographer",
-       "Creative: Interior Designer/ Content Writer/ Fashion Designer/ UI-UX Designer",
-       "Service & Hospitality: Retail Sales Person/ Hotel Staff/ Flight Attendants/ Chefs/ Nurses",
-       "Entrepreneur & Executive: Founder/ CEO/ CXO/ Board Member",
-       "Business Owner: Proprietor/ Partner"
-     ]
-   },
-   "q4_occasion": {
-     "canonical_label": "Occasion",
-     "labels": ["Occasion","The Occasion you are buying the ring for","Q4"],
-     "options": ["Anniversary","Birthday","Engagement","Graduation","Self-Gift","To Be Mother","Wedding","First Salary","Celebrating a win","Festive/Function"],
-     "backend_ids": { "Engagement": 299533, "Anniversary": 299534 }
-   },
-   "q5_purpose": {
-     "canonical_label": "Purpose",
-     "labels": ["Purpose","The Purpose for which the ring is needed","Q5"],
-     "options": ["Office wear","Daily wear","Party-wear","Astrology","Investment"],
-     "backend_ids": { "Party-wear": 299568, "Daily-wear": 299567 }
-   },
-   "q6_day": {
-     "canonical_label": "How would you describe your typical day?",
-     "labels": ["How would you describe your typical day?","How would you describe his typical day?","How would you describe her typical day?","Q6"],
-     "options": ["Calendarized Set Routine","Busy With a lot of Activities","Spontaneous & Free Spirited","Relaxed & Undisturbed","Hustle to build out of your passion"]
-   },
-   "q7_weekend": {
-     "canonical_label": "How do you prefer to spend your weekends?",
-     "labels": ["How do you prefer to spend your weekends?","How does he prefer to spend his weekends?","How does she prefer to spend her weekends?","Q7"],
-     "options": ["Relaxing at Home Solo","Going out & socialising","Engaging in Hobbies"]
-   },
-   "q8_work_dress": {
-     "canonical_label": "How do you typically dress for work?",
-     "labels": ["How do you typically dress for work?","How does he typically dress for work?","How does she typically dress for work?","Q8"],
-     "options": [
-       "Business Formals: Tie-Suit/ Skirt Blazer",
-       "Business Casuals: Shirt-Pants/ Trouser",
-       "Everyday Wear: Jeans & T-Shirt",
-       "Comfort Clothing: Lounge Wear",
-       "Stylish & Chic: Designer Clothing"
-     ]
-   },
-   "q9_social_dress": {
-     "canonical_label": "How do you typically dress for social events?",
-     "labels": ["How do you typically dress for social events?","How does he typically dress for social events?","How does she typically dress for social events?","Q9"],
-     "options": [
-       "Formals: Tie-Suit & Gown",
-       "Semi-Formals: Shirt-Pant & Dresses",
-       "Everyday Wear: Jeans & T-Shirt",
-       "Comfort Clothing: Lounge Wear",
-       "Stylish & Chic: Designer Clothing"
-     ]
-   },
-   "q10_waiting_line": {
-     "canonical_label": "You are waiting in a long line",
-     "labels": ["You are waiting in a long line","He is waiting in a long line","She is waiting in a long line","Q10"],
-     "options": [
-       "You will talk to people nearby",
-       "You prefer to be on your own",
-       "He will talk to people nearby",
-       "He will prefer to be by himself",
-       "She will talk to people nearby",
-       "She will prefer to be by herself"
-     ]
-   },
-   "q11_artwork": {
-     "canonical_label": "Whenever you see a painting",
-     "labels": ["Whenever you see a painting","Whenever he sees a piece of artwork","Whenever she sees a piece of artwork","Q11"],
-     "options": [
-       "You focus on the artistic details",
-       "You value the meaning of the art & origin",
-       "He will focus on the artistic details",
-       "He values the meaning of the art & origin",
-       "She will focus on the artistic details",
-       "She values the meaning of the art & origin"
-     ]
-   },
-   "q12_meeting_mother_unwell": {
-     "canonical_label": "Your mother is not feeling well & you have an important meeting to drive",
-     "labels": [
-       "Your mother is not felling well & you have an important meeting to drive",
-       "He has an important meeting to attend but his mother is unwell",
-       "She has an important meeting to attend but her mother is unwell",
-       "Q12"
-     ],
-     "options": [
-       "You will cancel the meeting to care for your mother",
-       "You will arrange care for your mother & attend the meeting",
-       "He will cancel the meeting to care for his mother",
-       "He will arrange care for his mother & attend the meeting",
-       "She will cancel the meeting to care for her mother",
-       "She will arrange care for her mother & attend the meeting"
-     ]
-   },
-   "q13_last_minute_plans": {
-     "canonical_label": "Last minute plans",
-     "labels": ["Last minute plans","How do you react to last minute plans?","How does he react to last minute plans?","How does she react to last minute plans?","Q13"],
-     "options": [
-       "You love them & adjust your day to accommodate the plan",
-       "You dislike last-minute plans & prefer planning ahead",
-       "He loves them & adjusts his day to accommodate the plan",
-       "He dislikes last-minute plans and prefers planning ahead",
-       "She loves them & adjusts her day to accommodate the plan",
-       "She dislikes last-minute plans and prefers planning ahead"
-     ]
-   }
- }
+
+  "allow_unknown_questions": true,
+
+  "must_have_questions_keys": [
+
+    "q1_purchasing_for",
+
+    "q2_gender",
+
+    "q3_profession",
+
+    "q4_occasion",
+
+    "q5_purpose",
+
+    "q6_day",
+
+    "q7_weekend",
+
+    "q8_work_dress",
+
+    "q9_social_dress",
+
+    "q10_waiting_line",
+
+    "q11_artwork",
+
+    "q12_meeting_mother_unwell",
+
+    "q13_last_minute_plans"
+
+  ],
+
+  "questions": {
+
+    "q1_purchasing_for": {
+
+      "canonical_label": "Who are you purchasing for?",
+
+      "labels": [
+
+        "Who are you purchasing for?",
+
+        "Who are you purchasing the ring for?",
+
+        "Purchasing for",
+
+        "Buying for",
+
+        "Who are you buying for?"
+
+      ],
+
+      "options": ["Self", "Others"]
+
+    },
+
+    "q1b_relation": {
+
+      "canonical_label": "Your relation to the person you are buying for",
+
+      "labels": [
+
+        "Your relation to the person you are buying for",
+
+        "Relation",
+
+        "Relation to the person",
+
+        "What is your relation to the person?"
+
+      ],
+
+      "options": [
+
+        "Wife",
+
+        "Mother",
+
+        "Father",
+
+        "Sister",
+
+        "Girlfriend",
+
+        "Husband",
+
+        "Boyfriend",
+
+        "Brother",
+
+        "Mother in Law",
+
+        "Father in Law",
+
+        "Friend"
+
+      ]
+
+    },
+
+    "q2_gender": {
+
+      "canonical_label": "Gender",
+
+      "labels": [
+
+        "Gender",
+
+        "Gender of the person you are buying for"
+
+      ],
+
+      "options": ["Male", "Female"]
+
+    },
+
+    "q3_profession": {
+
+      "canonical_label": "Profession",
+
+      "labels": [
+
+        "Profession",
+
+        "His Profession",
+
+        "Her Profession",
+
+        "What is the profession?"
+
+      ],
+
+      "options": [
+
+        "Knowledge Based: IT/ Marketing/ Architect/ Lawyer/ Teacher/ Accountant",
+
+        "Skill Based/Manual: Home-maker/ Baker/ Make-up Artist/ Graphics & VFX/ Photographer",
+
+        "Creative: Interior Designer/ Content Writer/ Fashion Designer/ UI-UX Designer",
+
+        "Service & Hospitality: Retail Sales Person/ Hotel Staff/ Flight Attendants/ Chefs/ Nurses",
+
+        "Entrepreneur & Executive: Founder/ CEO/ CXO/ Board Member",
+
+        "Business Owner: Proprietor/ Partner"
+
+      ]
+
+    },
+
+    "q4_occasion": {
+
+      "canonical_label": "Occasion",
+
+      "labels": [
+
+        "Occasion",
+
+        "The Occasion you are buying the ring for",
+
+        "What is the occasion?"
+
+      ],
+
+      "options": [
+
+        "Anniversary",
+
+        "Birthday",
+
+        "Engagement",
+
+        "Graduation",
+
+        "Self-Gift",
+
+        "To Be Mother",
+
+        "Wedding",
+
+        "First Salary",
+
+        "Celebrating a win",
+
+        "Festive/Function"
+
+      ]
+
+    },
+
+    "q5_purpose": {
+
+      "canonical_label": "Purpose",
+
+      "labels": [
+
+        "Purpose",
+
+        "The Purpose for which the ring is needed",
+
+        "What is the purpose of the ring?"
+
+      ],
+
+      "options": [
+
+        "Office wear",
+
+        "Daily wear",
+
+        "Party-wear",
+
+        "Astrology",
+
+        "Investment"
+
+      ]
+
+    },
+
+    "q6_day": {
+
+      "canonical_label": "How would you describe your typical day?",
+
+      "labels": [
+
+        "How would you describe your typical day?",
+
+        "How would you describe his typical day?",
+
+        "How would you describe her typical day?",
+
+        "Typical day"
+
+      ],
+
+      "options": [
+
+        "Calendarized Set Routine",
+
+        "Busy With a lot of Activities",
+
+        "Spontaneous & Free Spirited",
+
+        "Relaxed & Undisturbed",
+
+        "Hustle to build out of your passion"
+
+      ]
+
+    },
+
+    "q7_weekend": {
+
+      "canonical_label": "How do you prefer to spend your weekends?",
+
+      "labels": [
+
+        "How do you prefer to spend your weekends?",
+
+        "How does he prefer to spend his weekends?",
+
+        "How does she prefer to spend her weekends?",
+
+        "Weekends"
+
+      ],
+
+      "options": [
+
+        "Relaxing at Home Solo",
+
+        "Going out & socialising",
+
+        "Engaging in Hobbies"
+
+      ]
+
+    },
+
+    "q8_work_dress": {
+
+      "canonical_label": "How do you typically dress for work?",
+
+      "labels": [
+
+        "How do you typically dress for work?",
+
+        "How does he typically dress for work?",
+
+        "How does she typically dress for work?",
+
+        "Workwear",
+
+        "Work dress"
+
+      ],
+
+      "options": [
+
+        "Business Formals: Tie-Suit/ Skirt Blazer",
+
+        "Business Casuals: Shirt-Pants/ Trouser",
+
+        "Everyday Wear: Jeans & T-Shirt",
+
+        "Comfort Clothing: Lounge Wear",
+
+        "Stylish & Chic: Designer Clothing"
+
+      ]
+
+    },
+
+    "q9_social_dress": {
+
+      "canonical_label": "How do you typically dress for social events?",
+
+      "labels": [
+
+        "How do you typically dress for social events?",
+
+        "How does he typically dress for social events?",
+
+        "How does she typically dress for social events?",
+
+        "Social events dress",
+
+        "Event dress"
+
+      ],
+
+      "options": [
+
+        "Formals: Tie-Suit & Gown",
+
+        "Semi-Formals: Shirt-Pant & Dresses",
+
+        "Everyday Wear: Jeans & T-Shirt",
+
+        "Comfort Clothing: Lounge Wear",
+
+        "Stylish & Chic: Designer Clothing"
+
+      ]
+
+    },
+
+    "q10_waiting_line": {
+
+      "canonical_label": "You are waiting in a long line",
+
+      "labels": [
+
+        "You are waiting in a long line",
+
+        "He is waiting in a long line",
+
+        "She is waiting in a long line",
+
+        "Waiting in a long line"
+
+      ],
+
+      "options": [
+
+        "You will talk to people nearby",
+
+        "You prefer to be on your own",
+
+        "He will talk to people nearby",
+
+        "He will prefer to be by himself",
+
+        "She will talk to people nearby",
+
+        "She will prefer to be by herself"
+
+      ]
+
+    },
+
+    "q11_artwork": {
+
+      "canonical_label": "Whenever you see a painting",
+
+      "labels": [
+
+        "Whenever you see a painting",
+
+        "Whenever he sees a piece of artwork",
+
+        "Whenever she sees a piece of artwork",
+
+        "When you see a painting"
+
+      ],
+
+      "options": [
+
+        "You focus on the artistic details",
+
+        "You value the meaning of the art & origin",
+
+        "He will focus on the artistic details",
+
+        "He values the meaning of the art & origin",
+
+        "She will focus on the artistic details",
+
+        "She values the meaning of the art & origin"
+
+      ]
+
+    },
+
+    "q12_meeting_mother_unwell": {
+
+      "canonical_label": "Your mother is not feeling well & you have an important meeting to drive",
+
+      "labels": [
+
+        "Your mother is not feeling well & you have an important meeting to drive",
+
+        "He has an important meeting to attend but his mother is unwell",
+
+        "She has an important meeting to attend but her mother is unwell",
+
+        "Mother unwell and important meeting"
+
+      ],
+
+      "options": [
+
+        "You will cancel the meeting to care for your mother",
+
+        "You will arrange care for your mother & attend the meeting",
+
+        "He will cancel the meeting to care for his mother",
+
+        "He will arrange care for his mother & attend the meeting",
+
+        "She will cancel the meeting to care for her mother",
+
+        "She will arrange care for her mother & attend the meeting"
+
+      ]
+
+    },
+
+    "q13_last_minute_plans": {
+
+      "canonical_label": "Last minute plans",
+
+      "labels": [
+
+        "Last minute plans",
+
+        "How do you react to last minute plans?",
+
+        "How does he react to last minute plans?",
+
+        "How does she react to last minute plans?"
+
+      ],
+
+      "options": [
+
+        "You love them & adjust your day to accommodate the plan",
+
+        "You dislike last-minute plans & prefer planning ahead",
+
+        "He loves them & adjusts his day to accommodate the plan",
+
+        "He dislikes last-minute plans and prefers planning ahead",
+
+        "She loves them & adjusts her day to accommodate the plan",
+
+        "She dislikes last-minute plans and prefers planning ahead"
+
+      ]
+
+    }
+
+  }
+
 }
+ 
