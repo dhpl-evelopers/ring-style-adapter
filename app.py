@@ -1,248 +1,167 @@
-import os
-import json
-import traceback
-from datetime import datetime
+import os, json, time
+from typing import Dict, Any, List
 from flask import Flask, request, jsonify
 import requests
-import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
 app = Flask(__name__)
-# ---------- ENV ----------
-MAPPING_PATH = os.getenv("MAPPING_PATH", "/home/site/wwwroot/mapping.config.json")
-BACKEND_URL  = os.getenv("BACKEND_URL", "").rstrip("/")
-BACKEND_PATH = os.getenv("BACKEND_PATH", "/createRequest")
-BACKEND_API_KEY = os.getenv("BACKEND_API_KEY", "")  # optional
-# ---------- UTIL ----------
-def load_mapping():
+# --- config from env ---
+BACKEND_BASE_URL = os.environ.get("BACKEND_BASE_URL", "").rstrip("/")
+CREATE_PATH = os.environ.get("BACKEND_CREATE_PATH", "/CreateRequest")
+FETCH_PATH  = os.environ.get("BACKEND_FETCH_PATH",  "/fetchResponse")
+TIMEOUT_SEC = int(os.environ.get("BACKEND_TIMEOUT_SEC", "25"))
+MAPPING_PATH = os.environ.get("MAPPING_PATH", "/home/site/wwwroot/mapping.config.json")
+# --- load mapping on startup ---
+def load_mapping() -> Dict[str, Any]:
    with open(MAPPING_PATH, "r", encoding="utf-8") as f:
        return json.load(f)
-def as_text(x):
-   return (x or "").strip()
-def norm_key(s):
-   return as_text(s).lower()
-def soft_equal(a, b):
-   return norm_key(a) == norm_key(b)
-def find_question_key(mapping, q_text):
-   """
-   Given a user question text, find which mapping question key (q1..q13 etc.)
-   it belongs to by matching any of the 'labels' entries (case/space-insensitive).
-   """
-   qn = norm_key(q_text)
-   for qkey, qdef in mapping["questions"].items():
-       for lab in qdef.get("labels", []):
-           if norm_key(lab) == qn:
+_MAPPING = load_mapping()
+REQUIRED_USER_FIELDS = ["full_name", "email", "phone_number", "birth_date", "request_id", "result_key"]
+
+def _find_question_key_by_label(label: str) -> str | None:
+   """Resolve incoming question text to mapping key (q1_xxx)."""
+   if not label:
+       return None
+   label_norm = label.strip().lower()
+   for qkey, qdef in _mapping_questions().items():
+       labels = [qdef.get("canonical_label", "")] + qdef.get("labels", [])
+       for l in labels:
+           if l and l.strip().lower() == label_norm:
                return qkey
    return None
-def map_answer_text(qdef, ans_text):
+
+def _mapping_questions() -> Dict[str, Any]:
+   return _MAPPING.get("questions", {})
+
+def _normalize_answer(qkey: str, incoming_text: str) -> Dict[str, str]:
    """
-   For this use case the backend wants TEXT, not ids.
-   We still allow a whitelist of acceptable option labels.
-   If an answer doesn't match any listed option, we still pass the text through.
+   Given a mapping question key and the user's UI answer text,
+   return a dict with 'answer_text' (UI) and 'backend_value' (canonical for backend).
+   Free-text questions just echo the text for backend_value.
    """
-   a = as_text(ans_text)
-   options = qdef.get("options", [])
-   if not options:
-       return a
-   # try exact-insensitive match against options
-   for opt in options:
-       if soft_equal(opt, a):
-           return opt
-   # if no clean match, pass-through (backend expects text)
-   return a
-def extract_ui_answers(payload):
+   qdef = _mapping_questions().get(qkey, {})
+   opts: List[Dict[str, str]] = qdef.get("options", [])
+   # if options exist, try to map to backend_key
+   if opts:
+       tnorm = (incoming_text or "").strip().lower()
+       for opt in opts:
+           if (opt.get("text","").strip().lower() == tnorm) or (opt.get("backend_key","").strip().lower() == tnorm):
+               return {"answer_text": opt.get("text",""), "backend_value": opt.get("backend_key", opt.get("text",""))}
+       # not found -> keep text, backend will likely reject; better to pass the UI text
+       return {"answer_text": incoming_text, "backend_value": incoming_text}
+   else:
+       # free text
+       return {"answer_text": incoming_text, "backend_value": incoming_text}
+
+def _build_backend_xml(payload: Dict[str, Any], normalized: List[Dict[str, Any]]) -> str:
    """
-   Accepts both:
-     1) {"questionAnswers":[{"question":"...","answer":"..."}]}
-     2) {"answers":{"Gender":"Male", "Occasion":"Anniversary", ...}}
-     3) a flat dict inside payload["answers"] where keys are labels
-   Returns list of (question_text, answer_text)
+   Make the XML the backend expects, like the one in your working logs.
    """
-   out = []
-   if isinstance(payload.get("questionAnswers"), list):
-       for qa in payload["questionAnswers"]:
-           q = qa.get("question")
-           a = qa.get("answer")
-           if q is not None and a is not None:
-               out.append((str(q), str(a)))
-   elif isinstance(payload.get("answers"), dict):
-       for k, v in payload["answers"].items():
-           out.append((str(k), str(v)))
-   return out
-def require_fields(p, fields):
-   missing = [f for f in fields if not as_text(p.get(f))]
-   return missing
-def build_xml(mapping, user_fields, normalized_qas):
-   """
-   Build XML in the form your backend log shows (Request + User + QuestionAnswers).
-   Structure:
-<Request>
-<RequestID>...</RequestID>
-<ResultKey>...</ResultKey>
-<FullName>...</FullName>
-<Email>...</Email>
-<PhoneNumber>...</PhoneNumber>
-<DateOfBirth>YYYY-MM-DD</DateOfBirth>
-<QuestionAnswers>
-<QA>
-<Question>text</Question>
-<Answer>text</Answer>
-</QA>
-         ...
-</QuestionAnswers>
-</Request>
-   """
-   root = ET.Element("Request")
-   def add(tag, val):
-       el = ET.SubElement(root, tag)
-       el.text = as_text(val)
-   add("RequestID", user_fields["request_id"])
-   add("ResultKey", user_fields["result_key"])
-   add("FullName", user_fields["full_name"])
-   add("Email", user_fields["email"])
-   add("PhoneNumber", user_fields["phone_number"])
-   # normalize DoB to YYYY-MM-DD if possible
-   dob = as_text(user_fields["birth_date"])
-   dob_out = dob
-   if dob:
-       for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"):
-           try:
-               dob_out = datetime.strptime(dob, fmt).strftime("%Y-%m-%d")
-               break
-           except Exception:
-               pass
-   add("DateOfBirth", dob_out)
-   qa_parent = ET.SubElement(root, "QuestionAnswers")
-   for item in normalized_qas:
-       qa = ET.SubElement(qa_parent, "QA")
-       q_el = ET.SubElement(qa, "Question")
-       q_el.text = item["question"]
-       a_el = ET.SubElement(qa, "Answer")
-       a_el.text = item["answer"]
-   return ET.tostring(root, encoding="utf-8", method="xml")
-def call_backend(xml_bytes):
-   if not BACKEND_URL:
+   # Required header fields
+   full_name = escape(payload["full_name"])
+   email     = escape(payload["email"])
+   phone     = escape(payload["phone_number"])
+   dob       = escape(payload["birth_date"])
+   req_id    = escape(payload["request_id"])
+   res_key   = escape(payload["result_key"])
+   # Questions & Answers
+   qa_xml_parts = []
+   for item in normalized:
+       qtext = escape(item["question"])
+       aval  = escape(item["backend_value"])
+       qa_xml_parts.append(f"<QA><Question>{qtext}</Question><Answer>{aval}</Answer></QA>")
+   qa_xml = "".join(qa_xml_parts)
+   # The backend response you showed uses this shape:
+   return (
+       f"<Request>"
+       f"<RequestID>{req_id}</RequestID>"
+       f"<ResultKey>{res_key}</ResultKey>"
+       f"<FullName>{full_name}</FullName>"
+       f"<Email>{email}</Email>"
+       f"<PhoneNumber>{phone}</PhoneNumber>"
+       f"<DateOfBirth>{dob}</DateOfBirth>"
+       f"<QuestionAnswers>{qa_xml}</QuestionAnswers>"
+       f"</Request>"
+   )
+
+def _post_create_request(xml_body: str) -> str:
+   if not BACKEND_BASE_URL:
        raise RuntimeError("BACKEND_URL is not configured")
-   url = f"{BACKEND_URL}{BACKEND_PATH}"
-   headers = {
-       "Content-Type": "application/xml"
-   }
-   if BACKEND_API_KEY:
-       headers["x-api-key"] = BACKEND_API_KEY
-   resp = requests.post(url, data=xml_bytes, headers=headers, timeout=60)
-   return {
-       "status_code": resp.status_code,
-       "headers": dict(resp.headers),
-       "body": resp.text
-   }
-# ---------- ROUTES ----------
-@app.get("/healthz")
-def health():
-   return jsonify({"status": "ok"})
+   url = f"{BACKEND_BASE_URL}{CREATE_PATH}"
+   r = requests.post(url, data=xml_body.encode("utf-8"), headers={"Content-Type": "application/xml"}, timeout=TIMEOUT_SEC)
+   r.raise_for_status()
+   # assume backend returns a plain id or a small JSON/XML; try both
+   try:
+       j = r.json()
+       return j.get("response_id") or j.get("id") or j.get("ResponseId") or ""
+   except Exception:
+       # fallback: text
+       return r.text.strip()
+
+def _get_fetch_response(response_id: str) -> str:
+   url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
+   r = requests.get(url, params={"response_id": response_id}, timeout=TIMEOUT_SEC)
+   r.raise_for_status()
+   return r.text
+
 @app.post("/adapter")
 def adapter():
    try:
-       mapping = load_mapping()
-   except Exception as e:
-       return jsonify({"error": f"Failed to load mapping: {e}"}), 500
-   try:
-       payload = request.get_json(force=True, silent=False)
+       payload = request.get_json(force=True)
    except Exception:
-       return jsonify({"error": "Invalid JSON body"}), 400
-   # required user fields
-   user_fields = {
-       "full_name":  as_text(payload.get("full_name") or payload.get("fullName")),
-       "email":      as_text(payload.get("email")),
-       "phone_number": as_text(payload.get("phone_number") or payload.get("phoneNumber") or payload.get("mobile") or payload.get("whatsapp")),
-       "birth_date": as_text(payload.get("birth_date") or payload.get("dateOfBirth")),
-       "request_id": as_text(payload.get("request_id") or payload.get("resultKey") or payload.get("id") or payload.get("responseId") or payload.get("requestId")),
-       "result_key": as_text(payload.get("result_key") or payload.get("resultKey")),
-   }
-   missing = require_fields(user_fields, ["full_name","email","phone_number","birth_date","request_id","result_key"])
+       return jsonify({"error": "Invalid JSON"}), 400
+   # Validate user fields
+   missing = [k for k in REQUIRED_USER_FIELDS if not str(payload.get(k, "")).strip()]
    if missing:
-       return jsonify({
-           "error": "Missing required user fields",
-           "missing": missing
-       }), 400
-   # Gather incoming Q&A from flexible UI
-   incoming = extract_ui_answers(payload)
-   if not incoming:
-       return jsonify({"error": "No Q&A provided. Provide questionAnswers[] or answers{}."}), 400
-   # Normalize to mapping
-   normalized = []
-   seen = set()
-   # First pass: direct matches by label
-   for q_text, a_text in incoming:
-       qkey = find_question_key(mapping, q_text)
+       return jsonify({"error": "Missing required fields", "missing": missing}), 400
+   # Normalize Q&A
+   incoming_qas: List[Dict[str, str]] = payload.get("questionAnswers", [])
+   if not isinstance(incoming_qas, list):
+       return jsonify({"error": "questionAnswers must be a list"}), 400
+   normalized: List[Dict[str, Any]] = []
+   missing_keys: List[str] = []
+   must_have = set(_MAPPING.get("must_have_questions_keys", []))
+   for qa in incoming_qas:
+       question_text = (qa.get("question") or qa.get("id") or "").strip()
+       answer_text   = (qa.get("answer") or "").strip()
+       if not question_text:
+           # skip blanks
+           continue
+       qkey = _find_question_key_by_label(question_text)
        if not qkey:
-           # Not a known label, but we may allow passthrough if configuration enables it
-           if mapping.get("allow_unknown_questions", True):
-               normalized.append({"question": q_text.strip(), "answer": a_text.strip()})
+           if not _MAPPING.get("allow_unknown_questions", True):
                continue
-           else:
-               return jsonify({"error": f"No mapping found for question '{q_text}'"}), 400
-       qdef = mapping["questions"][qkey]
-       answer_out = map_answer_text(qdef, a_text)
-       final_question_text = qdef.get("canonical_label") or qdef["labels"][0]
-       normalized.append({"question": final_question_text, "answer": answer_out})
-       seen.add(qkey)
-   # Conditional: if purchaser is Others, ensure relation question appears
-   # Detect purchaser answer (Self/Others)
-   purchaser_ans = None
-   for item in normalized:
-       if norm_key(item["question"]) in [norm_key(l) for l in mapping["questions"]["q1_purchasing_for"]["labels"]]:
-           purchaser_ans = norm_key(item["answer"])
-           break
-   if purchaser_ans == "others":
-       # ensure relation present
-       has_relation = any(
-           norm_key(it["question"]) in [norm_key(l) for l in mapping["questions"]["q1b_relation"]["labels"]]
-           for it in normalized
-       )
-       if not has_relation:
-           return jsonify({"error": "When 'Others' is selected, 'Relation' is required but missing."}), 400
-   # Optional: enforce full set of mandatory questions if you want:
-   must_have_keys = mapping.get("must_have_questions_keys", [])
-   missing_qs = []
-   if must_have_keys:
-       present_keys = set()
-       for it in normalized:
-           # back-map canonical to qkey
-           ck = find_question_key(mapping, it["question"]) or ""
-           if ck:
-               present_keys.add(ck)
-       for k in must_have_keys:
-           if k not in present_keys:
-               missing_qs.append(k)
-   if missing_qs:
-       return jsonify({"error":"Mandatory questions missing", "missing_keys": missing_qs}), 400
-   # Build XML
-   xml_bytes = build_xml(mapping, user_fields, normalized)
-   # test_mode:
-   #   "xml_preview" -> return xml only (no backend call)
-   #   "live" (default) -> call backend and return live response
-   test_mode = (payload.get("test_mode") or "live").lower().strip()
-   result = {
+           # pass through unknown questions as free text
+           backend_value = answer_text
+           normalized.append({
+               "qkey": "unknown",
+               "question": question_text,
+               "answer_text": answer_text,
+               "backend_value": backend_value
+           })
+           continue
+       # map answer
+       ans = _normalize_answer(qkey, answer_text)
+       normalized.append({
+           "qkey": qkey,
+           "question": question_text,
+           "answer_text": ans["answer_text"],
+           "backend_value": ans["backend_value"]
+       })
+       if qkey in must_have:
+           must_have.remove(qkey)
+   if must_have:
+       # tell the UI exactly which logical keys are missing
+       return jsonify({"error": "Mandatory questions missing", "missing_keys": sorted(must_have)}), 400
+   # Build XML and call backend
+   xml_body = _build_backend_xml(payload, normalized)
+   response_id = _post_create_request(xml_body)
+   # short poll (single fetch; your backend looked synchronous)
+   backend_response = _get_fetch_response(response_id) if response_id else ""
+   return jsonify({
+       "status": "ok",
+       "request_id": payload["request_id"],
+       "result_key": payload["result_key"],
        "normalized": normalized,
-       "xml": xml_bytes.decode("utf-8")
-   }
-   if test_mode == "xml_preview":
-       return jsonify(result), 200
-   # Call backend
-   try:
-       backend_result = call_backend(xml_bytes)
-       result["backend_response"] = backend_result
-       return jsonify(result), (backend_result["status_code"] or 200)
-   except requests.RequestException as rexc:
-       return jsonify({
-           "error": "Backend call failed",
-           "details": str(rexc),
-           "xml": xml_bytes.decode("utf-8")
-       }), 502
-   except Exception as e:
-       return jsonify({
-           "error": "Unexpected error while calling backend",
-           "details": str(e),
-           "trace": traceback.format_exc(),
-           "xml": xml_bytes.decode("utf-8")
-       }), 500
-if __name__ == "__main__":
-   app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+       "response_id": response_id,
+       "backend_response": backend_response
+   })
