@@ -3,7 +3,12 @@ from typing import Dict, Any, List
 from flask import Flask, request, jsonify
 import requests
 from xml.sax.saxutils import escape
-app = Flask(__name__)
+from flask import Flask
+from asgiref.wsgi import WsgiToAsgi
+
+flask_app = Flask(__name__)
+# ... routes on flask_app ...
+app = WsgiToAsgi(flask_app)  # ASGI app for Uvicorn
 # --- config from env ---
 BACKEND_BASE_URL = os.environ.get("BACKEND_BASE_URL", "").rstrip("/")
 CREATE_PATH = os.environ.get("BACKEND_CREATE_PATH", "/CreateRequest")
@@ -15,7 +20,7 @@ def load_mapping() -> Dict[str, Any]:
    with open(MAPPING_PATH, "r", encoding="utf-8") as f:
        return json.load(f)
 _MAPPING = load_mapping()
-REQUIRED_USER_FIELDS = ["full_name", "email", "phone_number", "birth_date", "request_id", "result_key"]
+REQUIRED_USER_FIELDS = ["full_name", "email", "phone_number", "birth_date", "result_key"]
 
 def _find_question_key_by_label(label: str) -> str | None:
    """Resolve incoming question text to mapping key (q1_xxx)."""
