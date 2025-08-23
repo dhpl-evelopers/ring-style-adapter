@@ -1,128 +1,33 @@
 {
-
-  "mappings": {
-
-    "Q1": {
-
-      "question": "Who are you purchasing for?",
-
-      "allowed": ["Self", "Partner", "Spouse", "Family", "Friend", "Client", "Other"]
-
-    },
-
-    "Q2": {
-
-      "question": "Gender",
-
-      "allowed": ["Male", "Female", "Non-binary", "Prefer not to say"]
-
-    },
-
-    "Q3": {
-
-      "question": "Profession",
-
-      "allowed": ["Designer", "Engineer", "Doctor", "Lawyer", "Photographer", "Teacher", "Student", "Entrepreneur", "Consultant", "Finance", "Sales", "Other"]
-
-    },
-
-    "Q4": {
-
-      "question": "Occasion",
-
-      "allowed": ["Engagement", "Anniversary", "Wedding", "Birthday", "Casual", "Other"]
-
-    },
-
-    "Q5": {
-
-      "question": "Purpose",
-
-      "allowed": ["Daily wear", "Office wear", "Party wear", "Special occasions"]
-
-    },
-
-    "Q6": {
-
-      "question": "How would you describe your typical day?",
-
-      "allowed": ["Hustle to build out of your passion", "Structured 9-5 routine", "Balanced work and personal life", "Spontaneous & Free Spirited"]
-
-    },
-
-    "Q7": {
-
-      "question": "How do you prefer to spend your weekends?",
-
-      "allowed": ["Relaxing at home", "Spending time with family", "Going out & socialising", "Travel & Adventure"]
-
-    },
-
-    "Q8": {
-
-      "question": "How do you typically dress for work?",
-
-      "allowed": ["Business Formals: Tie-Suit / Skirt Blazer", "Business Casuals: Shirt-Trousers / Formal dress", "Smart Casuals: Jeans + Blazer", "Creative / Flexible dress code"]
-
-    },
-
-    "Q9": {
-
-      "question": "How do you typically dress for social events?",
-
-      "allowed": ["Stylish & Chic: Designer Clothing", "Casual yet Trendy", "Traditional & Elegant", "Minimalist"]
-
-    },
-
-    "Q10": {
-
-      "question": "You are waiting in a long line, what do you do?",
-
-      "allowed": ["Talk to people around", "Quietly wait and observe", "Check your phone", "Leave if it takes too long"]
-
-    },
-
-    "Q11": {
-
-      "question": "Whenever you see a painting, what do you notice first?",
-
-      "allowed": ["The colors & vibe", "The details & strokes", "The meaning/story behind it", "How it makes me feel"]
-
-    },
-
-    "Q12": {
-
-      "question": "Your mother is not feeling well & you have an important meeting to drive, what would you do?",
-
-      "allowed": ["Reschedule the meeting", "Ask someone to accompany her", "Take her myself & postpone work", "Balance both as best as I can"]
-
-    },
-
-    "Q13": {
-
-      "question": "Last minute plans — how do you handle them?",
-
-      "allowed": ["Always up for it!", "Depends on my schedule", "Not a fan of unplanned things", "I will go with the flow!"]
-
-    }
-
-  },
-
-  "defaults": {
-
-    "full_name": "",
-
-    "email": "",
-
-    "phone_number": "",
-
-    "birth_date": "",
-
-    "request_id": "",
-
-    "result_key": ""
-
-  }
-
+ "questionOrder": ["Q1","Q2","Q3","Q4","Q5","Q6","Q7","Q8","Q9","Q10","Q11","Q12","Q13"],
+ "questionIdToBackendId": {
+   "Q1": 70955,
+   "Q2": 70956,
+   "Q3": 70962,
+   "Q4": 70969,
+   "Q5": null,
+   "Q6": null,
+   "Q7": null,
+   "Q8": null,
+   "Q9": null,
+   "Q10": null,
+   "Q11": null,
+   "Q12": null,
+   "Q13": null
+ },
+ "options": {
+   "Q1": { "Self": 299504, "Gift": 299505 },
+   "Q2": { "Female": 299507, "Male": 299506 },
+   "Q3": { "Engagement": 299533, "Anniversary": 299534 },
+   "Q4": { "Party-wear": 299568, "Daily-wear": 299567 }
+ },
+ "enforceOptions": ["Q1","Q2","Q3","Q4"],
+ "defaults": {
+   "full_name": "",
+   "email": "",
+   "phone_number": "",
+   "birth_date": "",
+   "request_id": "",
+   "result_key": ""
+ }
 }
-
