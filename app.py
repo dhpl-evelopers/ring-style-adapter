@@ -1,464 +1,323 @@
 import os
-
 import json
-
 import time
-
 import logging
-
 from typing import Dict, Any, List, Tuple, Optional
-
-import requests
-
 from flask import Flask, request, jsonify
+import requests
+from xml.etree.ElementTree import Element, SubElement, tostring
 
-from lxml import etree
+# --------------------------------------------------------------------------------------
+# Flask
+# --------------------------------------------------------------------------------------
+app = Flask(_name_)
+app.config["JSON_SORT_KEYS"] = False
 
-# -----------------------------------------------------------------------------
-
-# Logging
-
-# -----------------------------------------------------------------------------
-
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-
-logging.basicConfig(
-
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-
-    format="%(asctime)s | %(levelname)s | %(message)s",
-
-)
-
-log = logging.getLogger("adapter")
-
-# -----------------------------------------------------------------------------
-
+# --------------------------------------------------------------------------------------
 # Env
+# --------------------------------------------------------------------------------------
+BACKEND_BASE_URL   = os.getenv("BACKEND_BASE_URL", "").rstrip("/")
+CREATE_PATH        = os.getenv("BACKEND_CREATE_PATH", "/createRequest")
+FETCH_PATH         = os.getenv("BACKEND_FETCH_PATH", "/fetchResponse")
+BACKEND_TIMEOUT_S  = int(os.getenv("BACKEND_TIMEOUT_SEC", "25"))
+MAPPING_PATH       = os.getenv("MAPPING_PATH", "/home/site/wwwroot/mapping.json")
+API_KEY_REQUIRED   = os.getenv("API_KEY_REQUIRED", "false").lower() == "true"
 
-# -----------------------------------------------------------------------------
+if not BACKEND_BASE_URL:
+    app.logger.warning("BACKEND_BASE_URL not configured. End‑to‑end calls will fail.")
 
-BACKEND_BASE_URL   = os.getenv("BACKEND_BASE_URL")                        # e.g. https://projectaiapi-<...>.azurewebsites.net
-
-CREATE_PATH        = os.getenv("BACKEND_CREATE_PATH", "/createRequest")   # POST by default
-
-FETCH_PATH         = os.getenv("BACKEND_FETCH_PATH", "/fetchResponse")    # GET by default (configurable)
-
-FETCH_METHOD       = os.getenv("BACKEND_FETCH_METHOD", "GET").upper()     # GET or POST
-
-TIMEOUT_SEC        = int(os.getenv("BACKEND_TIMEOUT_SEC", "25"))
-
-MAPPING_PATH       = os.getenv("MAPPING_PATH", "/home/site/wwwroot/mapping.config.json")
-
-ALLOW_UNKNOWN      = os.getenv("ALLOW_UNKNOWN_QUESTIONS", "false").lower() == "true"
-
-FETCH_RETRIES      = int(os.getenv("FETCH_RETRIES", "6"))
-
-FETCH_SLEEP_SEC    = float(os.getenv("FETCH_SLEEP_SEC", "2.0"))
-
-# Extra headers if your backend needs them (optional)
-
-EXTRA_HEADERS_JSON = os.getenv("BACKEND_EXTRA_HEADERS_JSON", "").strip()
-
-EXTRA_HEADERS = {}
-
-if EXTRA_HEADERS_JSON:
-
-    try:
-
-        EXTRA_HEADERS = json.loads(EXTRA_HEADERS_JSON)
-
-    except Exception:
-
-        log.warning("BACKEND_EXTRA_HEADERS_JSON is not valid JSON; ignoring.")
-
-# -----------------------------------------------------------------------------
-
-# App
-
-# -----------------------------------------------------------------------------
-
-app = Flask(__name__)
-
-# -----------------------------------------------------------------------------
-
+# --------------------------------------------------------------------------------------
 # Mapping loader
+# --------------------------------------------------------------------------------------
+class Mapping:
+    def _init_(self, raw: Dict[str, Any]) -> None:
+        self.allow_unknown = bool(raw.get("allow_unknown_questions", False))
+        self.must_have_keys: List[str] = list(raw.get("must_have_questions_keys", []))
+        self.questions: Dict[str, Dict[str, Any]] = dict(raw.get("questions", {}))
+        # Build quick reverse index of label -> key and option text normalization
+        self.label_to_key: Dict[str, str] = {}
+        self.normalized_options: Dict[str, Dict[str, str]] = {}
 
-# -----------------------------------------------------------------------------
+        for q_key, meta in self.questions.items():
+            labels = [meta.get("canonical_label", "")] + meta.get("labels", [])
+            for lbl in labels:
+                if lbl:
+                    self.label_to_key[lbl.strip().lower()] = q_key
 
-def load_mapping(path: str) -> Dict[str, Any]:
+            # options set (for coded questions)
+            opts = meta.get("options")
+            if isinstance(opts, list):
+                norm = {}
+                for o in opts:
+                    if isinstance(o, str):
+                        norm[o.strip().lower()] = o  # lowercase -> canonical option
+                self.normalized_options[q_key] = norm
 
-    log.info(f"Loading mapping from {path}")
+    def resolve_q_key(self, incoming_label_or_key: str) -> Optional[str]:
+        """Accept either a mapping key (e.g., q4_occasion) or a UI label string."""
+        if not incoming_label_or_key:
+            return None
+        k = incoming_label_or_key.strip()
+        if k in self.questions:
+            return k
+        return self.label_to_key.get(k.lower())
 
+    def normalize_answer(self, q_key: str, answer: str) -> str:
+        """If a question has coded options, normalize to a canonical option text."""
+        answer = (answer or "").strip()
+        if not answer:
+            return answer
+        norm_table = self.normalized_options.get(q_key)
+        if not norm_table:
+            return answer  # free text question
+        # try exact/lower match
+        return norm_table.get(answer.lower(), answer)
+
+def load_mapping(path: str) -> Mapping:
     with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    return Mapping(raw)
 
-        m = json.load(f)
-
-    # Quick sanity
-
-    if "questions" not in m:
-
-        raise RuntimeError("mapping.json missing 'questions' root")
-
-    return m
-
+# Load once at startup
 try:
-
     MAPPING = load_mapping(MAPPING_PATH)
-
-    MUST_HAVE = set(MAPPING.get("must_have_questions_keys", []))
-
-    log.info(f"Mapping loaded. must_have_questions_keys={sorted(MUST_HAVE)}")
-
+    app.logger.info(f"Loaded mapping from {MAPPING_PATH}")
 except Exception as e:
+    app.logger.exception(f"Failed to load mapping: {e}")
+    # still allow /health to work; /adapter will 500 until mapping is fixed
+    MAPPING = None  # type: ignore
 
-    log.exception("Failed to load mapping at startup")
-
-    raise
-
-# -----------------------------------------------------------------------------
-
-# Utilities
-
-# -----------------------------------------------------------------------------
-
-def _sanitize_for_log(s: str, maxlen: int = 1500) -> str:
-
-    if not isinstance(s, str):
-
-        s = str(s)
-
-    return (s[:maxlen] + " …(trunc)") if len(s) > maxlen else s
-
-def _labels_index(mapping: Dict[str, Any]) -> Dict[str, str]:
-
-    """
-
-    Build a lowercase label -> canonical key index for quick text matching.
-
-    """
-
-    idx = {}
-
-    for key, meta in mapping.get("questions", {}).items():
-
-        for lbl in meta.get("labels", []):
-
-            idx[lbl.strip().lower()] = key
-
-    return idx
-
-LABELS_INDEX = _labels_index(MAPPING)
-
-def _find_key_by_label(question_text: str) -> Optional[str]:
-
-    if not question_text:
-
+# --------------------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------------------
+def require_api_key(headers: Dict[str, str]) -> Optional[str]:
+    """Return error message if API key missing when required; else None."""
+    if not API_KEY_REQUIRED:
         return None
+    key = headers.get("x-api-key") or headers.get("X-API-Key")
+    if not key:
+        return "Missing API key header 'x-api-key'."
+    # If you need to validate value(s), add here.
+    return None
 
-    return LABELS_INDEX.get(question_text.strip().lower())
-
-def normalize_answers(ui_payload: Dict[str, Any]) -> Tuple[List[Dict[str, str]], List[str]]:
-
+def validate_and_normalize(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
-
-    Accepts flexible UI payload, returns a normalized list of {'key', 'question', 'answer'}.
-
-    Also returns list of missing keys (if required).
-
+    Returns (user_meta, normalized_qas).
+    - user_meta carries full_name/email/phone_number/birth_date/request_id/result_key
+    - normalized_qas is a list of {key, question_text, answer_text}
+    Raises ValueError with an error JSON to return if invalid.
     """
+    # Basic user fields (empty strings are fine — backend expects tags)
+    user_meta = {
+        "full_name":   payload.get("full_name") or payload.get("name") or "",
+        "email":       payload.get("email") or "",
+        "phone_number":payload.get("phone_number") or "",
+        "birth_date":  payload.get("birth_date") or "",
+        "request_id":  payload.get("request_id") or "",
+        "result_key":  payload.get("result_key") or "",
+        "test_mode":   payload.get("test_mode") or "live"
+    }
 
-    qas_in = ui_payload.get("questionAnswers", []) or []
+    raw_qas: List[Dict[str, Any]] = payload.get("questionAnswers") or payload.get("question_answers") or []
+    if not isinstance(raw_qas, list):
+        raise ValueError(json.dumps({"error": "questionAnswers must be a list"}))
 
-    normalized = []
-
+    normalized: List[Dict[str, Any]] = []
     seen_keys = set()
 
-    for item in qas_in:
-
-        # The UI can send: {"id": "Q1", "question": "Who are you purchasing for?", "answer": "Self"}
-
-        q_text = item.get("question")
-
-        q_id   = item.get("id")
-
-        answer = item.get("answer", "")
-
-        # Prefer canonical key by label text; fallback to id if your UI still sends "Q1" etc
-
-        key = _find_key_by_label(q_text)
-
-        if not key and isinstance(q_id, str):
-
-            # If your mapping uses keys like q1_purchasing_for and your UI sends "Q1", map here if you want:
-
-            qid_lower = q_id.strip().lower()
-
-            if qid_lower in MAPPING["questions"]:
-
-                key = qid_lower  # only if your mapping actually defined "q1", etc.
-
-        if not key:
-
-            # Keep unknown if allowed
-
-            if ALLOW_UNKNOWN:
-
-                normalized.append({"key": "__unknown__", "question": q_text or q_id or "", "answer": answer})
-
-                continue
-
-            else:
-
-                # skip unknown question but log it
-
-                log.warning(f"Unknown question: {_sanitize_for_log(q_text or q_id)} (set ALLOW_UNKNOWN_QUESTIONS=true to pass through)")
-
-                continue
-
-        if key in seen_keys:
-
-            # Take the first; ignore subsequent duplicates (or you can overwrite)
-
-            log.info(f"Duplicate question '{key}' ignored; first one kept")
-
+    for item in raw_qas:
+        if not isinstance(item, dict):
             continue
 
-        seen_keys.add(key)
+        # Accept either {id: "...", answer: "..."} OR {question:"...", answer:"..."}
+        q_label_or_key = item.get("question") or item.get("id") or item.get("key") or ""
+        answer_text = item.get("answer") or ""
 
-        normalized.append({"key": key, "question": q_text or key, "answer": answer})
+        q_key = mapping.resolve_q_key(str(q_label_or_key))
+        if not q_key:
+            if mapping.allow_unknown:
+                continue  # drop unknown questions silently
+            else:
+                raise ValueError(json.dumps({
+                    "error": "Unknown question",
+                    "question_received": q_label_or_key
+                }))
 
-    # Validate required keys
+        # Normalize option text (for coded questions)
+        answer_norm = mapping.normalize_answer(q_key, str(answer_text))
 
-    missing = []
+        meta = mapping.questions[q_key]
+        normalized.append({
+            "key": q_key,
+            "question_text": meta.get("canonical_label") or q_key,
+            "answer_text": answer_norm
+        })
+        seen_keys.add(q_key)
 
-    if MUST_HAVE and not ALLOW_UNKNOWN:
+    # Conditional requirement: relation when Others
+    purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
+    if purchasing and purchasing["answer_text"].strip().lower() == "others":
+        if "q1b_relation" not in seen_keys:
+            raise ValueError(json.dumps({
+                "error": "Mandatory question missing",
+                "missing_keys": ["q1b_relation"]
+            }))
 
-        present = {x["key"] for x in normalized if x["key"] != "__unknown__"}
+    # Enforce global must-have keys
+    missing = [k for k in mapping.must_have_keys if k not in seen_keys]
+    if missing:
+        raise ValueError(json.dumps({
+            "error": "Mandatory questions missing",
+            "missing_keys": missing
+        }))
 
-        missing = sorted(list(MUST_HAVE - present))
+    # Sort QAs in a sensible order (by must-have list first, then others)
+    order = {k: i for i, k in enumerate(mapping.must_have_keys)}
+    normalized.sort(key=lambda x: order.get(x["key"], 9999))
 
-    return normalized, missing
+    return user_meta, normalized
 
-def json_to_xml(ui_payload: Dict[str, Any], normalized_qas: List[Dict[str, str]]) -> str:
-
+def to_backend_xml(user_meta: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     """
-
-    Build XML in the exact shape your backend log expects.
-
+    Build the XML the backend expects, using canonical question text + final answer text.
     """
+    req = Element("Request")
 
-    root = etree.Element("Request")
+    SubElement(req, "RequestId").text  = user_meta.get("request_id", "")
+    SubElement(req, "ResultKey").text  = user_meta.get("result_key", "")
+    SubElement(req, "FullName").text   = user_meta.get("full_name", "")
+    SubElement(req, "Email").text      = user_meta.get("email", "")
+    SubElement(req, "PhoneNumber").text= user_meta.get("phone_number", "")
+    SubElement(req, "DateOfBirth").text= user_meta.get("birth_date", "")
 
-    # top-level fields
+    qas_root = SubElement(req, "QuestionAnswers")
+    for qa in qas:
+        qa_el = SubElement(qas_root, "QA")
+        SubElement(qa_el, "Question").text = qa["question_text"]
+        SubElement(qa_el, "Answer").text   = qa["answer_text"]
 
-    etree.SubElement(root, "FullName").text    = ui_payload.get("full_name", ui_payload.get("name", ""))
+    # tostring returns bytes; backend is fine with no XML declaration
+    return tostring(req, encoding="unicode")
 
-    etree.SubElement(root, "Email").text       = ui_payload.get("email", "")
+def call_backend(xml_body: str, test_mode: str) -> Dict[str, Any]:
+    """
+    POST /createRequest with XML; then poll GET /fetchResponse?responseId=...
+    until we get a final payload or timeout.
+    """
+    if not BACKEND_BASE_URL:
+        raise RuntimeError("BACKEND_URL is not configured")
 
-    etree.SubElement(root, "PhoneNumber").text = ui_payload.get("phone_number", "")
-
-    etree.SubElement(root, "BirthDate").text   = ui_payload.get("birth_date", "")
-
-    etree.SubElement(root, "RequestId").text   = ui_payload.get("request_id", "")
-
-    etree.SubElement(root, "ResultKey").text   = ui_payload.get("result_key", "")
-
-    qa_root = etree.SubElement(root, "QuestionAnswers")
-
-    for qa in normalized_qas:
-
-        q_el = etree.SubElement(qa_root, "QA")
-
-        etree.SubElement(q_el, "Question").text = qa["question"]
-
-        etree.SubElement(q_el, "Answer").text   = qa["answer"]
-
-    return etree.tostring(root, pretty_print=True, encoding="utf-8").decode("utf-8")
-
-def call_backend_create(xml_body: str) -> requests.Response:
-
-    url = f"{BACKEND_BASE_URL.rstrip('/')}{CREATE_PATH}"
-
+    # Create
+    create_url = f"{BACKEND_BASE_URL}{CREATE_PATH}"
     headers = {"Content-Type": "application/xml"}
+    resp = requests.post(create_url, data=xml_body.encode("utf-8"), headers=headers, timeout=BACKEND_TIMEOUT_S)
 
-    headers.update(EXTRA_HEADERS)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Backend createRequest failed: {resp.status_code} {resp.text}")
 
-    log.info(f"POST {url}")
+    create_json = {}
+    try:
+        create_json = resp.json()
+    except Exception:
+        # Some backends return XML; try to pass through
+        return {"backend_raw": resp.text}
 
-    log.debug(f"XML payload:\n{_sanitize_for_log(xml_body, 4000)}")
+    response_id = create_json.get("response_id") or create_json.get("ResponseId") or create_json.get("id")
+    if not response_id:
+        # If backend already returns a final recommendation, pass it back.
+        return {"backend_create": create_json}
 
-    return requests.post(url, data=xml_body.encode("utf-8"), headers=headers, timeout=TIMEOUT_SEC)
+    # Poll fetchResponse
+    fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
+    deadline = time.time() + BACKEND_TIMEOUT_S
 
-def call_backend_fetch(request_id: str) -> requests.Response:
+    while time.time() < deadline:
+        try:
+            r = requests.get(fetch_url, params={"responseId": response_id}, timeout=BACKEND_TIMEOUT_S)
+            if r.status_code >= 400:
+                raise RuntimeError(f"Backend fetchResponse failed: {r.status_code} {r.text}")
+            data = r.json()
+        except Exception as e:
+            raise RuntimeError(f"Error parsing fetchResponse: {e}")
 
-    url = f"{BACKEND_BASE_URL.rstrip('/')}{FETCH_PATH}"
+        status = str(data.get("status") or data.get("Status") or "").lower()
+        if status in ("done", "completed", "ok", "success"):
+            return {"backend_final": data}
 
-    headers = {"Accept": "*/*"}
+        # not done yet – short sleep, then continue
+        time.sleep(0.7)
 
-    headers.update(EXTRA_HEADERS)
+    # timed out – return last known data if any
+    return {"backend_fetch_timeout": True, "response_id": response_id}
 
-    if FETCH_METHOD == "GET":
-
-        url = f"{url}?response_id={request_id}"
-
-        log.info(f"GET {url}")
-
-        return requests.get(url, headers=headers, timeout=TIMEOUT_SEC)
-
-    else:
-
-        body = {"response_id": request_id}
-
-        log.info(f"POST {url} (fetch)")
-
-        log.debug(f"Fetch body: {body}")
-
-        return requests.post(url, json=body, headers=headers, timeout=TIMEOUT_SEC)
-
-# -----------------------------------------------------------------------------
-
-# Health
-
-# -----------------------------------------------------------------------------
-
-@app.get("/health")
-
+# --------------------------------------------------------------------------------------
+# Routes
+# --------------------------------------------------------------------------------------
+@app.get("/")
 def health():
-
-    return {"status": "ok"}
-
-# -----------------------------------------------------------------------------
-
-# Main adapter endpoint
-
-# -----------------------------------------------------------------------------
+    return jsonify({"status": "ok", "mapping_loaded": MAPPING is not None})
 
 @app.post("/adapter")
-
 def adapter():
+    # API key gate (optional)
+    err = require_api_key(request.headers)
+    if err:
+        return jsonify({"error": err}), 401
 
-    if not BACKEND_BASE_URL:
+    if MAPPING is None:
+        return jsonify({"error": "Mapping not loaded on server"}), 500
 
-        return jsonify({"error": "BACKEND_BASE_URL not configured"}), 500
-
+    # parse JSON
     try:
-
         payload = request.get_json(force=True, silent=False)
-
-    except Exception:
-
-        log.exception("Failed to parse JSON")
-
-        return jsonify({"error": "Invalid JSON"}), 400
-
-    log.info("Incoming UI JSON")
-
-    log.debug(_sanitize_for_log(json.dumps(payload, ensure_ascii=False), 4000))
-
-    # Normalize flexible UI
-
-    normalized, missing = normalize_answers(payload)
-
-    if missing and not ALLOW_UNKNOWN:
-
-        log.warning(f"Missing required keys: {missing}")
-
-        return jsonify({"error": "Mandatory questions missing", "missing_keys": missing}), 400
-
-    # Build XML exactly as backend expects
-
-    xml_body = json_to_xml(payload, normalized)
-
-    # send create
-
-    try:
-
-        create_resp = call_backend_create(xml_body)
-
+        if not isinstance(payload, dict):
+            raise ValueError("Body must be JSON object")
     except Exception as e:
+        return jsonify({"error": f"Invalid JSON body: {e}"}), 400
 
-        log.exception("Error calling backend create")
+    # normalize
+    try:
+        user_meta, qas = validate_and_normalize(payload, MAPPING)
+    except ValueError as ve:
+        # message is a JSON string
+        try:
+            return jsonify(json.loads(str(ve))), 400
+        except Exception:
+            return jsonify({"error": str(ve)}), 400
 
-        return jsonify({"backend_error": str(e)}), 502
-
-    log.info(f"Backend create status={create_resp.status_code}")
-
-    log.debug(f"Backend create body:\n{_sanitize_for_log(create_resp.text, 4000)}")
-
-    if create_resp.status_code not in (200, 201, 202):
-
+    # If caller only wants normalization (useful for testing)
+    if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
         return jsonify({
+            "status": "ok",
+            "request_id": user_meta["request_id"],
+            "result_key": user_meta["result_key"],
+            "normalized": [
+                {"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]}
+                for qa in qas
+            ]
+        })
 
-            "error": "Backend create failed",
+    # Build XML for backend
+    xml_body = to_backend_xml(user_meta, qas)
 
-            "status": create_resp.status_code,
-
-            "body": create_resp.text
-
-        }), 502
-
-    # Poll fetch (optional; remove if your backend returns everything on create)
-
-    req_id = payload.get("request_id", "")
-
-    fetch_text = ""
-
-    if FETCH_PATH:
-
-        for i in range(FETCH_RETRIES):
-
-            try:
-
-                fetch_resp = call_backend_fetch(req_id)
-
-                log.info(f"Fetch try {i+1}/{FETCH_RETRIES} status={fetch_resp.status_code}")
-
-                if fetch_resp.status_code == 200 and fetch_resp.text:
-
-                    fetch_text = fetch_resp.text
-
-                    break
-
-            except Exception:
-
-                log.exception("Error during backend fetch")
-
-                # continue polling
-
-            time.sleep(FETCH_SLEEP_SEC)
-
-    # Return a clear JSON
+    # Call backend end‑to‑end
+    try:
+        backend_result = call_backend(xml_body, user_meta["test_mode"])
+    except Exception as e:
+        app.logger.exception("Backend call failed")
+        return jsonify({"details": str(e), "xml": xml_body}), 500
 
     return jsonify({
-
         "status": "ok",
-
-        "request_id": req_id,
-
+        "request_id": user_meta["request_id"],
+        "result_key": user_meta["result_key"],
         "normalized": [
-
-            {"key": qa["key"], "question": qa["question"], "answer_text": qa["answer"]}
-
-            for qa in normalized
-
+            {"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]}
+            for qa in qas
         ],
+        "backend": backend_result
+    })
 
-        "backend_create_status": create_resp.status_code,
-
-        "backend_fetch": fetch_text
-
-    }), 200
-
-# -----------------------------------------------------------------------------
-
-# Azure entrypoint when run directly
-
-# -----------------------------------------------------------------------------
-
-if __name__ == "__main__":
-
-    # For local run; in Azure use gunicorn
-
-    app.run(host="0.0.0.0", port=8000)
- 
+# For local dev (NOT used by gunicorn in Azure)
+if _name_ == "_main_":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
