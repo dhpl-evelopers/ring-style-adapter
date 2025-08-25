@@ -1,4 +1,3 @@
-```python
 import os
 import json
 import time
@@ -150,7 +149,6 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         })
         seen.add(q_key)
 
-    # conditional: relation required if purchasing for Others
     purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
     if purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
         raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
@@ -167,17 +165,8 @@ def _flatten_qas_to_text(qas: List[Dict[str, str]]) -> str:
     return "\n".join(f"{qa['question_text']} :: {qa['answer_text']}" for qa in qas)
 
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
-    """
-    Build a superset XML that satisfies multiple backend parsers:
-    - snake_case + TitleCase for person fields
-    - many date tag aliases
-    - multiple QA container spellings
-    - root-level QA list
-    - plain-text and JSON-string variants of Q/A
-    """
     req = Element("Request")
 
-    # IDs / person meta — duplicate in multiple casings/aliases
     for tag in ("request_id", "RequestId", "RequestID"):
         SubElement(req, tag).text = user.get("request_id", "")
     for tag in ("result_key", "ResultKey"):
@@ -189,12 +178,10 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     for tag in ("phone_number", "PhoneNumber", "contact", "Contact"):
         SubElement(req, tag).text = user.get("phone_number", "")
 
-    # dates: include all variants some backends look for
     date_val = user.get("birth_date", "")
     for tag in ("date_of_birth", "DateOfBirth", "dob", "DOB", "date", "Date"):
         SubElement(req, tag).text = date_val
 
-    # QA containers: snake_case, TitleCase, camelCase, and common lowercase variant
     containers = [
         ("question_answers", "qa", "question", "answer"),
         ("QuestionAnswers", "QA", "Question", "Answer"),
@@ -209,21 +196,16 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
             SubElement(qa_el, q_tag).text = qa["question_text"]
             SubElement(qa_el, a_tag).text = qa["answer_text"]
 
-    # Root-level list of QA items (no container)
     for qa in qas:
         qa_el = SubElement(req, "QA")
         SubElement(qa_el, "Question").text = qa["question_text"]
         SubElement(qa_el, "Answer").text = qa["answer_text"]
 
-    # Plain-text variants – add extra aliases "qna" and "Qna"
     flat = _flatten_qas_to_text(qas)
-    for tag in (
-        "qna_text", "QNA", "qna", "Qna",
-        "question_answers_text", "QuestionAnswersText", "questionAnswersText"
-    ):
+    for tag in ("qna_text", "QNA", "qna", "Qna",
+                "question_answers_text", "QuestionAnswersText", "questionAnswersText"):
         SubElement(req, tag).text = flat
 
-    # JSON-string variants (in case they parse JSON from XML text)
     qa_json = json.dumps(
         [{"question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
         ensure_ascii=False
@@ -277,7 +259,6 @@ def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
                 data = r.json()
             except Exception as e:
                 raise RuntimeError(f"Error parsing fetchResponse: {e}")
-
             last = data
             status = str(data.get("status") or data.get("Status") or "").lower()
             if status in ("done", "completed", "ok", "success"):
@@ -382,4 +363,3 @@ def adapter():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
-```
