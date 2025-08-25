@@ -149,14 +149,17 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         })
         seen.add(q_key)
 
+    # Conditional: require relation if "Purchasing for" is Others
     purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
     if purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
         raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
 
+    # Enforce must-have keys
     missing = [k for k in mapping.must_have_keys if k not in seen]
     if missing:
         raise ValueError(json.dumps({"error": "Mandatory questions missing", "missing_keys": missing}))
 
+    # Stable sort: must-have order first, then others
     order = {k: i for i, k in enumerate(mapping.must_have_keys)}
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
     return user, normalized
@@ -165,8 +168,17 @@ def _flatten_qas_to_text(qas: List[Dict[str, str]]) -> str:
     return "\n".join(f"{qa['question_text']} :: {qa['answer_text']}" for qa in qas)
 
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
+    """
+    Build a superset XML that satisfies multiple backend parsers:
+    - snake_case + TitleCase for person fields
+    - many date tag aliases
+    - multiple QA container spellings
+    - root-level QA list
+    - plain-text and JSON-string variants of Q/A (including <QNA>)
+    """
     req = Element("Request")
 
+    # IDs / person meta in multiple casings/aliases
     for tag in ("request_id", "RequestId", "RequestID"):
         SubElement(req, tag).text = user.get("request_id", "")
     for tag in ("result_key", "ResultKey"):
@@ -178,10 +190,12 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     for tag in ("phone_number", "PhoneNumber", "contact", "Contact"):
         SubElement(req, tag).text = user.get("phone_number", "")
 
+    # Date aliases
     date_val = user.get("birth_date", "")
     for tag in ("date_of_birth", "DateOfBirth", "dob", "DOB", "date", "Date"):
         SubElement(req, tag).text = date_val
 
+    # QA containers with common spellings/casings
     containers = [
         ("question_answers", "qa", "question", "answer"),
         ("QuestionAnswers", "QA", "Question", "Answer"),
@@ -196,16 +210,19 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
             SubElement(qa_el, q_tag).text = qa["question_text"]
             SubElement(qa_el, a_tag).text = qa["answer_text"]
 
+    # Root-level QA items
     for qa in qas:
         qa_el = SubElement(req, "QA")
         SubElement(qa_el, "Question").text = qa["question_text"]
         SubElement(qa_el, "Answer").text = qa["answer_text"]
 
+    # Consolidated plain-text variants (add QNA + aliases)
     flat = _flatten_qas_to_text(qas)
     for tag in ("qna_text", "QNA", "qna", "Qna",
                 "question_answers_text", "QuestionAnswersText", "questionAnswersText"):
         SubElement(req, tag).text = flat
 
+    # JSON-string variants (some backends parse JSON from XML nodes)
     qa_json = json.dumps(
         [{"question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
         ensure_ascii=False
@@ -229,16 +246,20 @@ def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
     try:
         create_json = resp.json()
     except Exception:
+        # If backend returns XML/plain text, pass-through
         return {"backend_raw": resp.text}
 
+    # Common response id keys
     response_id = (create_json.get("response_id") or
                    create_json.get("ResponseId") or
                    create_json.get("id") or
                    create_json.get("Id"))
 
     if not response_id:
+        # Some backends return final payload immediately
         return {"backend_create": create_json}
 
+    # Poll fetch endpoint with a few param name variants
     fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
     deadline = time.time() + BACKEND_TIMEOUT_S
     last = None
@@ -259,6 +280,7 @@ def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
                 data = r.json()
             except Exception as e:
                 raise RuntimeError(f"Error parsing fetchResponse: {e}")
+
             last = data
             status = str(data.get("status") or data.get("Status") or "").lower()
             if status in ("done", "completed", "ok", "success"):
@@ -335,6 +357,7 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
+    # Normalization-only path (no backend call)
     if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
         return jsonify({
             "status": "ok",
@@ -344,6 +367,7 @@ def adapter():
             "correlation_id": g.cid,
         })
 
+    # Build XML and call backend
     xml_body = _xml_superset(user, qas)
     try:
         backend_result = _call_backend(xml_body, g.cid)
@@ -362,4 +386,5 @@ def adapter():
     })
 
 if __name__ == "__main__":
+    # Local dev only. Azure will run via gunicorn: `gunicorn -w 2 -b 0.0.0.0:8000 app:app`
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
