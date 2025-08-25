@@ -31,6 +31,10 @@ MAX_CONTENT_LENGTH  = int(_getenv("MAX_CONTENT_LENGTH", str(512 * 1024)))
 LOG_LEVEL           = _getenv("LOG_LEVEL", "INFO").upper()
 LOG_XML_ALWAYS      = _getenv("LOG_XML_ALWAYS", "false").lower() == "true"
 
+# If true, when create doesn't give us a concrete response_id or link,
+# we will poll using result_key (your "res_123456") first.
+PREFER_RESULT_KEY_WHEN_NO_ID = _getenv("PREFER_RESULT_KEY_WHEN_NO_ID", "true").lower() == "true"
+
 # ==================== App / Logging ====================
 
 app = Flask(__name__)
@@ -100,7 +104,7 @@ class Mapping:
 
 def _load_mapping(path: str) -> Optional[Mapping]:
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             raw = json.load(f)
         if not isinstance(raw, dict) or "questions" not in raw:
             raise ValueError("mapping must include 'questions'")
@@ -122,13 +126,23 @@ def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
         return "Missing API key header 'x-api-key'."
     return None
 
-def _normalize_from_questionAnswers(payload: Dict[str, Any], mapping: Mapping) -> Tuple[List[Dict[str, Any]], List[str]]:
+def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    user = {
+        "full_name":    payload.get("full_name") or payload.get("name") or "",
+        "email":        payload.get("email") or "",
+        "phone_number": payload.get("phone_number") or payload.get("contact") or "",
+        "birth_date":   payload.get("birth_date") or payload.get("dob") or payload.get("date") or "",
+        "request_id":   payload.get("request_id") or payload.get("id") or "",
+        "result_key":   payload.get("result_key") or "",
+        "test_mode":    payload.get("test_mode") or "live",
+    }
+
     raw_qas = payload.get("questionAnswers") or payload.get("question_answers") or []
     if not isinstance(raw_qas, list):
         raise ValueError(json.dumps({"error": "questionAnswers must be a list"}))
 
     normalized: List[Dict[str, Any]] = []
-    seen: List[str] = []
+    seen = set()
     for item in raw_qas:
         if not isinstance(item, dict):
             continue
@@ -145,36 +159,8 @@ def _normalize_from_questionAnswers(payload: Dict[str, Any], mapping: Mapping) -
             "question_text": meta.get("canonical_label") or q_key,
             "answer_text": mapping.normalize_answer(q_key, str(ans))
         })
-        seen.append(q_key)
-    return normalized, seen
+        seen.add(q_key)
 
-def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    user = {
-        "full_name":    payload.get("full_name") or payload.get("name") or "",
-        "email":        payload.get("email") or "",
-        "phone_number": payload.get("phone_number") or payload.get("contact") or "",
-        "birth_date":   payload.get("birth_date") or payload.get("dob") or payload.get("date") or "",
-        "request_id":   payload.get("request_id") or payload.get("id") or "",
-        "result_key":   payload.get("result_key") or "",
-        "test_mode":    payload.get("test_mode") or "live",
-    }
-
-    normalized: List[Dict[str, Any]]
-    seen: List[str]
-
-    # Accept already-normalized list OR map from questionAnswers
-    if isinstance(payload.get("normalized"), list) and payload["normalized"] and \
-       all(isinstance(x, dict) and {"key","question","answer"} <= set(x.keys()) for x in payload["normalized"]):
-        normalized = [{
-            "key": x["key"],
-            "question_text": x["question"],
-            "answer_text": x["answer"]
-        } for x in payload["normalized"]]
-        seen = [x["key"] for x in normalized]
-    else:
-        normalized, seen = _normalize_from_questionAnswers(payload, mapping)
-
-    # Conditional: require relation when purchasing for Others
     purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
     if purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
         raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
@@ -191,13 +177,7 @@ def _flatten_qas_to_text(qas: List[Dict[str, Any]]) -> str:
     return "\n".join(f"{qa['question_text']} :: {qa['answer_text']}" for qa in qas)
 
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
-    """
-    Build XML that is compatible with various backends.
-    (This is your current superset; unchanged.)
-    """
     req = Element("Request")
-
-    # IDs / person meta — duplicate in multiple casings/aliases
     for tag in ("request_id", "RequestId", "RequestID"):
         SubElement(req, tag).text = user.get("request_id", "")
     for tag in ("result_key", "ResultKey"):
@@ -209,12 +189,10 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     for tag in ("phone_number", "PhoneNumber", "contact", "Contact"):
         SubElement(req, tag).text = user.get("phone_number", "")
 
-    # dates
     date_val = user.get("birth_date", "")
     for tag in ("date_of_birth", "DateOfBirth", "dob", "DOB", "date", "Date"):
         SubElement(req, tag).text = date_val
 
-    # Flat text & JSON mirrors
     flat = _flatten_qas_to_text(qas)
     for tag in ("qna_text", "QNA", "qna", "Qna",
                 "question_answers_text", "QuestionAnswersText", "questionAnswersText"):
@@ -227,7 +205,6 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     for tag in ("question_answers_json", "QuestionAnswersJson"):
         SubElement(req, tag).text = qa_json
 
-    # QA containers
     containers = [
         ("question_answers", "qa", "question", "answer"),
         ("QuestionAnswers", "QA", "Question", "Answer"),
@@ -267,29 +244,40 @@ def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]
                     pass
     return 0.7
 
-def _build_fetch_target(create_json: Dict[str, Any], headers: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    id_keys = ["response_id", "ResponseId", "responseId", "id", "Id", "code", "Code", "requestCode", "RequestCode", "requestId", "request_id"]
-    for k in id_keys:
-        if k in create_json and str(create_json[k]).strip():
-            return {"mode": "id", "id": str(create_json[k]).strip()}
+def _build_fetch_target(create_json: Optional[Dict[str, Any]],
+                        headers: Dict[str, Any],
+                        user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Figure out how to poll:
+    1) explicit id/code from create response
+    2) explicit link
+    3) HAL links
+    4) Location header
+    5) Fallback to result_key (if configured)
+    """
+    if create_json:
+        id_keys = ["response_id", "ResponseId", "responseId", "id", "Id", "code", "Code", "requestCode", "RequestCode", "requestId", "request_id"]
+        for k in id_keys:
+            if k in create_json and str(create_json[k]).strip():
+                return {"mode": "id", "id": str(create_json[k]).strip(), "id_hint": k}
 
-    link_keys = ["fetch_url", "fetchUrl", "url", "URL", "link", "Link", "result_url", "resultUrl"]
-    for k in link_keys:
-        if k in create_json and str(create_json[k]).strip():
-            url = str(create_json[k]).strip()
-            if url.startswith("/"):
-                url = urljoin(BACKEND_BASE_URL + "/", url.lstrip("/"))
-            return {"mode": "link", "url": url}
-
-    links = create_json.get("_links") or create_json.get("links")
-    if isinstance(links, dict):
-        for cand in ("result", "self", "poll", "status"):
-            node = links.get(cand)
-            if isinstance(node, dict) and node.get("href"):
-                url = str(node["href"]).strip()
+        link_keys = ["fetch_url", "fetchUrl", "url", "URL", "link", "Link", "result_url", "resultUrl"]
+        for k in link_keys:
+            if k in create_json and str(create_json[k]).strip():
+                url = str(create_json[k]).strip()
                 if url.startswith("/"):
                     url = urljoin(BACKEND_BASE_URL + "/", url.lstrip("/"))
                 return {"mode": "link", "url": url}
+
+        links = create_json.get("_links") or create_json.get("links")
+        if isinstance(links, dict):
+            for cand in ("result", "self", "poll", "status"):
+                node = links.get(cand)
+                if isinstance(node, dict) and node.get("href"):
+                    url = str(node["href"]).strip()
+                    if url.startswith("/"):
+                        url = urljoin(BACKEND_BASE_URL + "/", url.lstrip("/"))
+                    return {"mode": "link", "url": url}
 
     loc = headers.get("Location") or headers.get("location")
     if loc and str(loc).strip():
@@ -298,11 +286,14 @@ def _build_fetch_target(create_json: Dict[str, Any], headers: Dict[str, Any]) ->
             url = urljoin(BACKEND_BASE_URL + "/", url.lstrip("/"))
         return {"mode": "link", "url": url}
 
+    # Fallback: use result_key to poll if allowed
+    rk = (user or {}).get("result_key") or ""
+    if PREFER_RESULT_KEY_WHEN_NO_ID and rk.strip():
+        return {"mode": "id", "id": rk.strip(), "id_hint": "result_key"}
+
     return None
 
-# ==================== OPTION B changes start here ====================
-
-def _call_backend(xml_body: str, cid: str, fallback_id: Optional[str] = None) -> Dict[str, Any]:
+def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, Any]:
     create_url = f"{BACKEND_BASE_URL}{CREATE_PATH}"
     headers = {"Content-Type": "application/xml", "Accept": "application/json, */*"}
 
@@ -312,28 +303,15 @@ def _call_backend(xml_body: str, cid: str, fallback_id: Optional[str] = None) ->
 
     # 1) CREATE
     resp = HTTP.post(create_url, data=xml_body.encode("utf-8"), headers=headers, timeout=BACKEND_TIMEOUT_S)
-
-    # Log create response to understand polling decisions
-    try:
-        logger.info(
-            "create status=%s headers=%s body(500)=%s",
-            resp.status_code,
-            dict(resp.headers),
-            (resp.text or "")[:500],
-        )
-    except Exception:
-        pass
-
     if resp.status_code >= 400:
-        # Return body to caller for visibility
-        return {"backend_error": True, "status_code": resp.status_code, "body": resp.text}
+        raise RuntimeError(f"Backend createRequest failed: {resp.status_code} {resp.text}")
 
-    # Try JSON; if not JSON, just pass raw back
     create_json: Optional[Dict[str, Any]] = None
     try:
         create_json = resp.json()
     except Exception:
-        return {"backend_raw": resp.text}
+        # Non-JSON final
+        return {"backend_raw": resp.text, "polling_with": None}
 
     def _is_final(d: Dict[str, Any]) -> bool:
         status = str(d.get("status") or d.get("Status") or "").lower()
@@ -346,29 +324,36 @@ def _call_backend(xml_body: str, cid: str, fallback_id: Optional[str] = None) ->
         return False
 
     if _is_final(create_json):
-        return {"backend_final": create_json}
+        return {"backend_final": create_json, "polling_with": None}
 
-    # 2) Figure out how to poll: by ID or direct link/Location
-    fetch_target = _build_fetch_target(create_json, resp.headers)
-
-    # >>> Option B: use fallback id (result_key) if create didn't give id/link
-    if not fetch_target and fallback_id:
-        fetch_target = {"mode": "id", "id": str(fallback_id)}
-
+    # 2) Decide how to poll
+    fetch_target = _build_fetch_target(create_json, resp.headers, user)
     if not fetch_target:
-        # No ID or link => just return what we got
-        return {"backend_create": create_json}
+        # No id/link; return create body for the caller to inspect
+        return {"backend_create": create_json, "polling_with": None}
 
     deadline = time.time() + BACKEND_TIMEOUT_S
-    last = None
+    last: Any = None
 
     while time.time() < deadline:
         try:
             if fetch_target["mode"] == "id":
                 fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
                 rid = fetch_target["id"]
-                # Try many likely param names (added result_key/resultKey)
-                param_variants = [
+                hint = fetch_target.get("id_hint") or ""
+
+                # Order matters: prefer the param that matches our hint.
+                by_resultkey = [
+                    {"result_key": rid},
+                    {"resultKey": rid},
+                    {"response_id": rid},
+                    {"responseId": rid},
+                    {"id": rid},
+                    {"code": rid},
+                    {"requestId": rid},
+                    {"request_id": rid},
+                ]
+                by_responseid = [
                     {"response_id": rid},
                     {"responseId": rid},
                     {"id": rid},
@@ -378,47 +363,86 @@ def _call_backend(xml_body: str, cid: str, fallback_id: Optional[str] = None) ->
                     {"result_key": rid},
                     {"resultKey": rid},
                 ]
+                param_variants = by_resultkey if "result" in hint.lower() else by_responseid
+
                 for params in param_variants:
                     r = HTTP.get(fetch_url, params=params, headers={"Accept": "application/json, */*"}, timeout=BACKEND_TIMEOUT_S)
+
+                    # 202 => definitely not ready
                     if r.status_code == 202:
                         time.sleep(_get_retry_after(r, None))
                         continue
+
+                    # Some backends return 200 with a *text* placeholder like "list index out of range".
+                    ctype = (r.headers.get("Content-Type") or "").lower()
+                    if r.status_code == 200 and "application/json" not in ctype:
+                        body_text = r.text.strip() if isinstance(r.text, str) else ""
+                        if not body_text or "list index out of range" in body_text.lower():
+                            # Treat as "still computing"
+                            time.sleep(0.7)
+                            continue
+                        # Otherwise, accept as final raw
+                        return {"backend_raw": body_text, "polling_with": hint or "id"}
+
                     if r.status_code >= 400:
-                        last = {"status_code": r.status_code, "body": r.text}
+                        last = {"status_code": r.status_code, "body": r.text, "params_tried": params}
+                        # 4xx from some variants, try the next variant before backing off
                         continue
+
+                    # Try to parse JSON
                     try:
                         data = r.json()
                     except Exception:
-                        return {"backend_raw": r.text}
+                        # Non-JSON 200 where we couldn't parse => final raw
+                        return {"backend_raw": r.text, "polling_with": hint or "id"}
+
                     last = data
+                    # Final?
                     status = str(data.get("status") or data.get("Status") or "").lower()
                     if status in ("done", "completed", "ok", "success", "ready", "finished") or data.get("done") is True:
-                        return {"backend_final": data}
+                        return {"backend_final": data, "polling_with": hint or "id"}
+
+                # No variant succeeded in this loop; small pause
                 time.sleep(0.7)
+
             else:
+                # Direct polling link
                 link = fetch_target["url"]
                 r = HTTP.get(link, headers={"Accept": "application/json, */*"}, timeout=BACKEND_TIMEOUT_S)
                 if r.status_code == 202:
                     time.sleep(_get_retry_after(r, None))
                     continue
+
+                ctype = (r.headers.get("Content-Type") or "").lower()
+                if r.status_code == 200 and "application/json" not in ctype:
+                    body_text = r.text.strip() if isinstance(r.text, str) else ""
+                    if not body_text or "list index out of range" in body_text.lower():
+                        time.sleep(0.7)
+                        continue
+                    return {"backend_raw": body_text, "polling_with": "link"}
+
                 if r.status_code >= 400:
                     last = {"status_code": r.status_code, "body": r.text}
                     time.sleep(0.7)
                     continue
+
                 try:
                     data = r.json()
                 except Exception:
-                    return {"backend_raw": r.text}
+                    return {"backend_raw": r.text, "polling_with": "link"}
+
                 last = data
                 status = str(data.get("status") or data.get("Status") or "").lower()
                 if status in ("done", "completed", "ok", "success", "ready", "finished") or data.get("done") is True:
-                    return {"backend_final": data}
+                    return {"backend_final": data, "polling_with": "link"}
+
                 time.sleep(_get_retry_after(r, last))
+
         except Exception as e:
             last = {"exception": str(e)}
             time.sleep(0.7)
 
-    return {"backend_fetch_timeout": True, "last": last, "fetch_target": fetch_target}
+    return {"backend_fetch_timeout": True, "last": last, "fetch_target": fetch_target, "polling_with": fetch_target.get("id_hint") if isinstance(fetch_target, dict) else None}
 
 def _json_error(status: int, code: str, message: str, details: Optional[Dict[str, Any]] = None):
     payload = {"status": "error", "error": {"code": code, "message": message}, "correlation_id": g.get("cid")}
@@ -457,7 +481,6 @@ def ready():
 
 @app.post("/adapter")
 def adapter():
-    # API key gate (optional)
     if API_KEY_REQUIRED:
         err = _require_api_key(request.headers)
         if err:
@@ -465,7 +488,6 @@ def adapter():
     if MAPPING is None:
         return _json_error(503, "not_ready", "Mapping not loaded")
 
-    # Parse JSON
     try:
         payload = request.get_json(force=True, silent=False)
         if not isinstance(payload, dict):
@@ -473,7 +495,6 @@ def adapter():
     except Exception as e:
         return _json_error(400, "bad_json", f"Invalid JSON: {e}")
 
-    # Normalize UI -> canonical Q/As
     try:
         user, qas = _validate(payload, MAPPING)
     except ValueError as ve:
@@ -482,7 +503,6 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
-    # Optional normalize-only path (no backend call)
     if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
         return jsonify({
             "status": "ok",
@@ -492,15 +512,11 @@ def adapter():
             "correlation_id": g.cid,
         })
 
-    # Build XML and call backend
     xml_body = _xml_superset(user, qas)
-
-    # If the caller wants to see the XML for debugging, include it in the response
     want_xml_echo = (request.headers.get("X-Debug-XML", "0").lower() in ("1", "true", "yes"))
 
     try:
-        # >>> pass fallback_id = result_key so we always attempt to poll
-        backend_result = _call_backend(xml_body, g.cid, fallback_id=user["result_key"])
+        backend_result = _call_backend(xml_body, g.cid, user)
     except Exception as e:
         logger.exception("Backend call failed cid=%s", g.cid)
         body = {"details": str(e), "xml": xml_body} if want_xml_echo or LOG_XML_ALWAYS else {"details": str(e)}
