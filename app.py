@@ -76,16 +76,20 @@ class Mapping:
                 self.normalized_options[q_key] = norm
 
     def resolve_q_key(self, incoming: str) -> Optional[str]:
-        if not incoming: return None
+        if not incoming:
+            return None
         k = incoming.strip()
-        if k in self.questions: return k
+        if k in self.questions:
+            return k
         return self.label_to_key.get(k.lower())
 
     def normalize_answer(self, q_key: str, answer: str) -> str:
         answer = (answer or "").strip()
-        if not answer: return answer
+        if not answer:
+            return answer
         norm = self.normalized_options.get(q_key)
-        if not norm: return answer
+        if not norm:
+            return answer
         return norm.get(answer.lower(), answer)
 
 def _load_mapping(path: str) -> Optional[Mapping]:
@@ -103,9 +107,11 @@ MAPPING = _load_mapping(MAPPING_PATH)
 
 # ==================== Helpers ====================
 def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
-    if not API_KEY_REQUIRED: return None
+    if not API_KEY_REQUIRED:
+        return None
     key = headers.get("x-api-key") or headers.get("X-API-Key")
-    if not key: return "Missing API key header 'x-api-key'."
+    if not key:
+        return "Missing API key header 'x-api-key'."
     return None
 
 def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -126,12 +132,14 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     normalized: List[Dict[str, Any]] = []
     seen = set()
     for item in raw_qas:
-        if not isinstance(item, dict): continue
+        if not isinstance(item, dict):
+            continue
         label = item.get("question") or item.get("id") or item.get("key") or ""
         ans   = item.get("answer") or ""
         q_key = mapping.resolve_q_key(str(label))
         if not q_key:
-            if mapping.allow_unknown: continue
+            if mapping.allow_unknown:
+                continue
             raise ValueError(json.dumps({"error": "Unknown question", "question_received": label}))
         meta = mapping.questions[q_key]
         normalized.append({
@@ -141,7 +149,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         })
         seen.add(q_key)
 
-    # example conditional rule
+    # conditional: relation required if purchasing for Others
     purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
     if purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
         raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
@@ -154,12 +162,18 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
     return user, normalized
 
+def _flatten_qas_to_text(qas: List[Dict[str, str]]) -> str:
+    # One line per QA; very easy for legacy parsers to read .text
+    return "\n".join(f"{qa['question_text']} :: {qa['answer_text']}" for qa in qas)
+
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     """
     Build a superset XML that satisfies multiple backend parsers:
-    - both snake_case and TitleCase for fields
-    - all common date tag aliases
+    - snake_case + TitleCase for person fields
+    - many date tag aliases
     - multiple QA container spellings
+    - root-level QA list
+    - plain-text and JSON-string variants of Q/A
     """
     req = Element("Request")
 
@@ -180,11 +194,13 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     for tag in ("date_of_birth", "DateOfBirth", "dob", "DOB", "date", "Date"):
         SubElement(req, tag).text = date_val
 
-    # QA containers: snake_case, TitleCase, and camelCase
+    # QA containers: snake_case, TitleCase, camelCase, and common lowercase variant
     containers = [
         ("question_answers", "qa", "question", "answer"),
         ("QuestionAnswers", "QA", "Question", "Answer"),
         ("questionAnswers", "qa", "question", "answer"),
+        ("questionanswers", "qa", "question", "answer"),
+        ("Questionanswers", "QA", "Question", "Answer"),
     ]
     for cont_name, qa_tag, q_tag, a_tag in containers:
         cont = SubElement(req, cont_name)
@@ -192,6 +208,25 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
             qa_el = SubElement(cont, qa_tag)
             SubElement(qa_el, q_tag).text = qa["question_text"]
             SubElement(qa_el, a_tag).text = qa["answer_text"]
+
+    # Root-level list of QA items (no container) – some legacy code expects this
+    for qa in qas:
+        qa_el = SubElement(req, "QA")
+        SubElement(qa_el, "Question").text = qa["question_text"]
+        SubElement(qa_el, "Answer").text = qa["answer_text"]
+
+    # Plain-text variants – for backends that do .find(...).text on a node
+    flat = _flatten_qas_to_text(qas)
+    for tag in ("qna_text", "QNA", "question_answers_text", "QuestionAnswersText", "questionAnswersText"):
+        SubElement(req, tag).text = flat
+
+    # JSON-string variants (in case they parse JSON from XML text)
+    qa_json = json.dumps(
+        [{"question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
+        ensure_ascii=False
+    )
+    for tag in ("question_answers_json", "QuestionAnswersJson"):
+        SubElement(req, tag).text = qa_json
 
     return tostring(req, encoding="unicode")
 
@@ -254,7 +289,8 @@ def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
 
 def _json_error(status: int, code: str, message: str, details: Optional[Dict[str, Any]] = None):
     payload = {"status": "error", "error": {"code": code, "message": message}, "correlation_id": g.get("cid")}
-    if details: payload["details"] = details
+    if details:
+        payload["details"] = details
     return jsonify(payload), status
 
 # ==================== Hooks ====================
@@ -273,6 +309,18 @@ def _after(resp):
     return resp
 
 # ==================== Routes ====================
+@app.get("/")
+def index():
+    return jsonify({
+        "service": "ring-style-adapter",
+        "status": "ok",
+        "endpoints": {
+            "GET /health": "Basic liveness",
+            "GET /ready": "Mapping loaded and ready",
+            "POST /adapter": "Send UI JSON here (Content-Type: application/json)"
+        }
+    })
+
 @app.get("/health")
 def health():
     return jsonify({"status": "ok", "service": "adapter"})
@@ -288,7 +336,8 @@ def adapter():
     # gate
     if API_KEY_REQUIRED:
         err = _require_api_key(request.headers)
-        if err: return _json_error(401, "unauthorized", err)
+        if err:
+            return _json_error(401, "unauthorized", err)
     if MAPPING is None:
         return _json_error(503, "not_ready", "Mapping not loaded")
 
@@ -339,3 +388,4 @@ def adapter():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
