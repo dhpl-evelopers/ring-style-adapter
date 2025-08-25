@@ -122,23 +122,17 @@ def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
         return "Missing API key header 'x-api-key'."
     return None
 
-def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    user = {
-        "full_name":    payload.get("full_name") or payload.get("name") or "",
-        "email":        payload.get("email") or "",
-        "phone_number": payload.get("phone_number") or payload.get("contact") or "",
-        "birth_date":   payload.get("birth_date") or payload.get("dob") or payload.get("date") or "",
-        "request_id":   payload.get("request_id") or payload.get("id") or "",
-        "result_key":   payload.get("result_key") or "",
-        "test_mode":    payload.get("test_mode") or "live",
-    }
-
+def _normalize_from_questionAnswers(payload: Dict[str, Any], mapping: Mapping) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """
+    Normalize the flexible UI 'questionAnswers' list into canonical keys+labels
+    using the mapping. Returns (normalized, seen_keys)
+    """
     raw_qas = payload.get("questionAnswers") or payload.get("question_answers") or []
     if not isinstance(raw_qas, list):
         raise ValueError(json.dumps({"error": "questionAnswers must be a list"}))
 
     normalized: List[Dict[str, Any]] = []
-    seen = set()
+    seen: List[str] = []
     for item in raw_qas:
         if not isinstance(item, dict):
             continue
@@ -155,7 +149,36 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
             "question_text": meta.get("canonical_label") or q_key,
             "answer_text": mapping.normalize_answer(q_key, str(ans))
         })
-        seen.add(q_key)
+        seen.append(q_key)
+    return normalized, seen
+
+def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    # Person/meta fields
+    user = {
+        "full_name":    payload.get("full_name") or payload.get("name") or "",
+        "email":        payload.get("email") or "",
+        "phone_number": payload.get("phone_number") or payload.get("contact") or "",
+        "birth_date":   payload.get("birth_date") or payload.get("dob") or payload.get("date") or "",
+        # request_id intentionally ignored/unused to satisfy "remove RequestId"
+        "result_key":   payload.get("result_key") or "",
+        "test_mode":    payload.get("test_mode") or "live",
+    }
+
+    normalized: List[Dict[str, Any]]
+    seen: List[str]
+
+    # Accept either an already-normalized list OR raw questionAnswers
+    if isinstance(payload.get("normalized"), list) and payload["normalized"] and \
+       all(isinstance(x, dict) and {"key","question","answer"} <= set(x.keys()) for x in payload["normalized"]):
+        # Use as-is, but unify field names
+        normalized = [{
+            "key": x["key"],
+            "question_text": x["question"],
+            "answer_text": x["answer"]
+        } for x in payload["normalized"]]
+        seen = [x["key"] for x in normalized]
+    else:
+        normalized, seen = _normalize_from_questionAnswers(payload, mapping)
 
     # Conditional example: require relation when purchasing for Others
     purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
@@ -166,6 +189,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     if missing:
         raise ValueError(json.dumps({"error": "Mandatory questions missing", "missing_keys": missing}))
 
+    # Keep canonical order
     order = {k: i for i, k in enumerate(mapping.must_have_keys)}
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
     return user, normalized
@@ -175,53 +199,49 @@ def _flatten_qas_to_text(qas: List[Dict[str, Any]]) -> str:
 
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     """
-    Build XML that is compatible with various backends:
-    - Provide multiple casings/aliases for person fields
-    - Include QA as containers, plus flat text mirrors and JSON mirrors
-    - Also set container .text to the flat string so parsers that expect text under <questionAnswers> work
+    Build XML WITHOUT RequestId, as requested.
+    It includes:
+      - <ResultKey>, <Name>, <Email>, <Phone> and <PhoneNumber>
+      - Q/A in multiple container casings (snake, Camel, Title)
+      - container .text has flat Q/A text for very simple parsers
+      - JSON mirror of QA
     """
     req = Element("Request")
 
-    # IDs / person meta — duplicate in multiple casings/aliases
-    for tag in ("request_id", "RequestId", "RequestID"):
-        SubElement(req, tag).text = user.get("request_id", "")
-    for tag in ("result_key", "ResultKey"):
-        SubElement(req, tag).text = user.get("result_key", "")
-    for tag in ("full_name", "FullName"):
-        SubElement(req, tag).text = user.get("full_name", "")
-    for tag in ("email", "Email"):
-        SubElement(req, tag).text = user.get("email", "")
-    for tag in ("phone_number", "PhoneNumber", "contact", "Contact"):
-        SubElement(req, tag).text = user.get("phone_number", "")
+    # IDs / person meta — NO RequestId
+    SubElement(req, "ResultKey").text = user.get("result_key", "")
+    SubElement(req, "Name").text = user.get("full_name", "")
+    SubElement(req, "Email").text = user.get("email", "")
+    # Provide both, some backends bind to one or the other
+    SubElement(req, "Phone").text = user.get("phone_number", "")
+    SubElement(req, "PhoneNumber").text = user.get("phone_number", "")
 
-    # dates: include all variants some backends look for
+    # Optional dates (harmless if empty)
     date_val = user.get("birth_date", "")
-    for tag in ("date_of_birth", "DateOfBirth", "dob", "DOB", "date", "Date"):
+    for tag in ("DateOfBirth", "DOB", "Date"):
         SubElement(req, tag).text = date_val
 
     # Flat text & JSON mirrors
     flat = _flatten_qas_to_text(qas)
-    for tag in ("qna_text", "QNA", "qna", "Qna",
-                "question_answers_text", "QuestionAnswersText", "questionAnswersText"):
+    for tag in ("QuestionAnswersText", "questionAnswersText", "qna_text", "QNA"):
         SubElement(req, tag).text = flat
 
     qa_json = json.dumps(
         [{"question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
         ensure_ascii=False
     )
-    for tag in ("question_answers_json", "QuestionAnswersJson"):
+    for tag in ("QuestionAnswersJson", "question_answers_json"):
         SubElement(req, tag).text = qa_json
 
-    # QA containers: snake_case, TitleCase, camelCase.
-    # Also set the container .text to the flat string for parsers doing .find('.//questionAnswers').text
+    # QA containers: TitleCase, camelCase, snake_case
     containers = [
-        ("question_answers", "qa", "question", "answer"),
         ("QuestionAnswers", "QA", "Question", "Answer"),
         ("questionAnswers", "qa", "question", "answer"),
+        ("question_answers", "qa", "question", "answer"),
     ]
     for cont_name, qa_tag, q_tag, a_tag in containers:
         cont = SubElement(req, cont_name)
-        cont.text = flat  # important: satisfy backends reading .text from the container
+        cont.text = flat  # satisfy parsers reading .text
         for qa in qas:
             qa_el = SubElement(cont, qa_tag)
             SubElement(qa_el, q_tag).text = qa["question_text"]
@@ -230,7 +250,6 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     return tostring(req, encoding="unicode")
 
 def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]]) -> float:
-    """Figure out how long to wait before the next poll."""
     ra = resp.headers.get("Retry-After")
     if ra:
         try:
@@ -255,19 +274,11 @@ def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]
     return 0.7
 
 def _build_fetch_target(create_json: Dict[str, Any], headers: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Understand whatever the backend returned:
-    - An indicator code (ID),
-    - A direct polling URL (in JSON or Location header), or
-    - HAL/links-ish shapes.
-    """
-    # common id/code keys
     id_keys = ["response_id", "ResponseId", "responseId", "id", "Id", "code", "Code", "requestCode", "RequestCode", "requestId", "request_id"]
     for k in id_keys:
         if k in create_json and str(create_json[k]).strip():
             return {"mode": "id", "id": str(create_json[k]).strip()}
 
-    # direct link keys
     link_keys = ["fetch_url", "fetchUrl", "url", "URL", "link", "Link", "result_url", "resultUrl"]
     for k in link_keys:
         if k in create_json and str(create_json[k]).strip():
@@ -276,7 +287,6 @@ def _build_fetch_target(create_json: Dict[str, Any], headers: Dict[str, Any]) ->
                 url = urljoin(BACKEND_BASE_URL + "/", url.lstrip("/"))
             return {"mode": "link", "url": url}
 
-    # HAL-style
     links = create_json.get("_links") or create_json.get("links")
     if isinstance(links, dict):
         for cand in ("result", "self", "poll", "status"):
@@ -287,7 +297,6 @@ def _build_fetch_target(create_json: Dict[str, Any], headers: Dict[str, Any]) ->
                     url = urljoin(BACKEND_BASE_URL + "/", url.lstrip("/"))
                 return {"mode": "link", "url": url}
 
-    # Location header from 202/201
     loc = headers.get("Location") or headers.get("location")
     if loc and str(loc).strip():
         url = str(loc).strip()
@@ -302,24 +311,23 @@ def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
     headers = {"Content-Type": "application/xml", "Accept": "application/json, */*"}
 
     logger.info("POST %s cid=%s", create_url, cid)
-    logger.info("xml_string :  %s", xml_body)  # always log for visibility (matches previous logs)
+    logger.info("xml_string :  %s", xml_body)
     logger.debug("XML cid=%s payload=%s", cid, xml_body)
 
     # 1) CREATE
     resp = HTTP.post(create_url, data=xml_body.encode("utf-8"), headers=headers, timeout=BACKEND_TIMEOUT_S)
 
     if resp.status_code >= 400:
-        raise RuntimeError(f"Backend createRequest failed: {resp.status_code} {resp.text}")
+        # Return body to caller for visibility
+        return {"backend_error": True, "status_code": resp.status_code, "body": resp.text}
 
     # Try JSON; if not JSON, just pass raw back
     create_json: Optional[Dict[str, Any]] = None
     try:
         create_json = resp.json()
     except Exception:
-        # If create already returns a final, non-JSON payload, just hand it back.
         return {"backend_raw": resp.text}
 
-    # If the create response itself looks final, short-circuit
     def _is_final(d: Dict[str, Any]) -> bool:
         status = str(d.get("status") or d.get("Status") or "").lower()
         if status in ("done", "completed", "ok", "success", "ready", "finished"):
@@ -333,10 +341,9 @@ def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
     if _is_final(create_json):
         return {"backend_final": create_json}
 
-    # 2) Figure out how to poll: by ID or direct link/Location
+    # 2) Figure out how to poll
     fetch_target = _build_fetch_target(create_json, resp.headers)
     if not fetch_target:
-        # No ID or link => just return what we got
         return {"backend_create": create_json}
 
     deadline = time.time() + BACKEND_TIMEOUT_S
@@ -347,7 +354,6 @@ def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
             if fetch_target["mode"] == "id":
                 fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
                 rid = fetch_target["id"]
-                # Try many likely param names
                 param_variants = [
                     {"response_id": rid},
                     {"responseId": rid},
@@ -367,15 +373,13 @@ def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
                     try:
                         data = r.json()
                     except Exception:
-                        # Non-JSON final
                         return {"backend_raw": r.text}
                     last = data
-                    if _is_final(data):
+                    status = str(data.get("status") or data.get("Status") or "").lower()
+                    if status in ("done", "completed", "ok", "success", "ready", "finished") or data.get("done") is True:
                         return {"backend_final": data}
-                # none worked this loop
                 time.sleep(0.7)
             else:
-                # Direct polling link
                 link = fetch_target["url"]
                 r = HTTP.get(link, headers={"Accept": "application/json, */*"}, timeout=BACKEND_TIMEOUT_S)
                 if r.status_code == 202:
@@ -393,7 +397,6 @@ def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
                 status = str(data.get("status") or data.get("Status") or "").lower()
                 if status in ("done", "completed", "ok", "success", "ready", "finished") or data.get("done") is True:
                     return {"backend_final": data}
-                # Not final yet — body-provided retry hints
                 time.sleep(_get_retry_after(r, last))
         except Exception as e:
             last = {"exception": str(e)}
@@ -467,7 +470,6 @@ def adapter():
     if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
         return jsonify({
             "status": "ok",
-            "request_id": user["request_id"],
             "result_key": user["result_key"],
             "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
             "correlation_id": g.cid,
@@ -476,7 +478,6 @@ def adapter():
     # Build XML and call backend
     xml_body = _xml_superset(user, qas)
 
-    # If the caller wants to see the XML for debugging, include it in the response (header X-Debug-XML: 1)
     want_xml_echo = (request.headers.get("X-Debug-XML", "0").lower() in ("1", "true", "yes"))
 
     try:
@@ -488,7 +489,6 @@ def adapter():
 
     result_payload = {
         "status": "ok",
-        "request_id": user["request_id"],
         "result_key": user["result_key"],
         "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
         "backend": backend_result,
