@@ -1,3 +1,26 @@
+{
+  "required_top_level_fields": ["request_id", "result_key", "full_name", "email", "phone_number"],
+
+  "fields": {
+    "request_id": "$.request_id",
+    "result_key": "$.result_key",
+    "name": "$.full_name",
+    "email": "$.email",
+    "phone_number": "$.phone_number"
+  },
+
+  "questions_path": "$.normalized[*]",
+  "question_fields": {
+    "key": "$.key",
+    "question": "$.question",
+    "answer": "$.answer"
+  },
+
+  "output": {
+    "content_type": "application/xml",
+    "template": "<Request>\n  <RequestId>{{ request_id }}</RequestId>\n  <ResultKey>{{ result_key }}</ResultKey>\n  <Name>{{ name }}</Name>\n  <Email>{{ email }}</Email>\n  <Phone>{{ phone_number }}</Phone>\n  <QuestionAnswers>\n  {{#each questions}}\n    <qa>\n      <key>{{ key }}</key>\n      <question>{{ question }}</question>\n      <answer>{{ answer }}</answer>\n    </qa>\n  {{/each}}\n  </QuestionAnswers>\n</Request>"
+  }
+}
 {  "allow_unknown_questions": true,
   "must_have_questions_keys": [
     "q1_purchasing_for","q2_gender","q3_profession","q4_occasion","q5_purpose",
