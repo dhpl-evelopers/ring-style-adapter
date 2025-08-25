@@ -1,3 +1,4 @@
+```python
 import os
 import json
 import time
@@ -163,7 +164,6 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     return user, normalized
 
 def _flatten_qas_to_text(qas: List[Dict[str, str]]) -> str:
-    # One line per QA; very easy for legacy parsers to read .text
     return "\n".join(f"{qa['question_text']} :: {qa['answer_text']}" for qa in qas)
 
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
@@ -209,15 +209,18 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
             SubElement(qa_el, q_tag).text = qa["question_text"]
             SubElement(qa_el, a_tag).text = qa["answer_text"]
 
-    # Root-level list of QA items (no container) – some legacy code expects this
+    # Root-level list of QA items (no container)
     for qa in qas:
         qa_el = SubElement(req, "QA")
         SubElement(qa_el, "Question").text = qa["question_text"]
         SubElement(qa_el, "Answer").text = qa["answer_text"]
 
-    # Plain-text variants – for backends that do .find(...).text on a node
+    # Plain-text variants – add extra aliases "qna" and "Qna"
     flat = _flatten_qas_to_text(qas)
-    for tag in ("qna_text", "QNA", "question_answers_text", "QuestionAnswersText", "questionAnswersText"):
+    for tag in (
+        "qna_text", "QNA", "qna", "Qna",
+        "question_answers_text", "QuestionAnswersText", "questionAnswersText"
+    ):
         SubElement(req, tag).text = flat
 
     # JSON-string variants (in case they parse JSON from XML text)
@@ -244,20 +247,16 @@ def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
     try:
         create_json = resp.json()
     except Exception:
-        # if backend returns XML or text, pass it back
         return {"backend_raw": resp.text}
 
-    # common id keys
     response_id = (create_json.get("response_id") or
                    create_json.get("ResponseId") or
                    create_json.get("id") or
                    create_json.get("Id"))
 
     if not response_id:
-        # some backends return final payload immediately
         return {"backend_create": create_json}
 
-    # Poll fetch endpoint: try multiple param names
     fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
     deadline = time.time() + BACKEND_TIMEOUT_S
     last = None
@@ -333,7 +332,6 @@ def ready():
 
 @app.post("/adapter")
 def adapter():
-    # gate
     if API_KEY_REQUIRED:
         err = _require_api_key(request.headers)
         if err:
@@ -341,7 +339,6 @@ def adapter():
     if MAPPING is None:
         return _json_error(503, "not_ready", "Mapping not loaded")
 
-    # parse JSON
     try:
         payload = request.get_json(force=True, silent=False)
         if not isinstance(payload, dict):
@@ -349,7 +346,6 @@ def adapter():
     except Exception as e:
         return _json_error(400, "bad_json", f"Invalid JSON: {e}")
 
-    # normalize UI -> canonical Q/As
     try:
         user, qas = _validate(payload, MAPPING)
     except ValueError as ve:
@@ -358,7 +354,6 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
-    # optional normalize-only path (no backend call)
     if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
         return jsonify({
             "status": "ok",
@@ -368,7 +363,6 @@ def adapter():
             "correlation_id": g.cid,
         })
 
-    # build superset XML and call backend
     xml_body = _xml_superset(user, qas)
     try:
         backend_result = _call_backend(xml_body, g.cid)
@@ -388,4 +382,4 @@ def adapter():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
-
+```
