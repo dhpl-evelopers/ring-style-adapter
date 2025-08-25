@@ -13,6 +13,7 @@ from urllib3.util.retry import Retry
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 # ==================== Config ====================
+
 def _getenv(name: str, default: Optional[str] = None, required: bool = False) -> str:
     v = os.getenv(name, default)
     if required and not (v and str(v).strip()):
@@ -29,6 +30,7 @@ MAX_CONTENT_LENGTH = int(_getenv("MAX_CONTENT_LENGTH", str(512 * 1024)))
 LOG_LEVEL          = _getenv("LOG_LEVEL", "INFO").upper()
 
 # ==================== App / Logging ====================
+
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
@@ -38,6 +40,7 @@ logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s 
 logger = logging.getLogger("adapter")
 
 # ==================== HTTP Session (retries) ====================
+
 def _session() -> requests.Session:
     s = requests.Session()
     retries = Retry(
@@ -55,13 +58,17 @@ def _session() -> requests.Session:
 HTTP = _session()
 
 # ==================== Mapping ====================
+
 class Mapping:
     def __init__(self, raw: Dict[str, Any]) -> None:
         self.allow_unknown = bool(raw.get("allow_unknown_questions", False))
         self.must_have_keys: List[str] = list(raw.get("must_have_questions_keys", []))
         self.questions: Dict[str, Dict[str, Any]] = dict(raw.get("questions", {}))
+
+        # label->key & options-normalizer
         self.label_to_key: Dict[str, str] = {}
         self.normalized_options: Dict[str, Dict[str, str]] = {}
+
         for q_key, meta in self.questions.items():
             labels = [meta.get("canonical_label", "")] + meta.get("labels", [])
             for lbl in labels:
@@ -72,7 +79,7 @@ class Mapping:
                 norm = {}
                 for o in opts:
                     if isinstance(o, str):
-                        norm[o.strip().lower()] = o
+                        norm[o.strip().lower()] = o  # keep canonical casing
                 self.normalized_options[q_key] = norm
 
     def resolve_q_key(self, incoming: str) -> Optional[str]:
@@ -106,6 +113,7 @@ def _load_mapping(path: str) -> Optional[Mapping]:
 MAPPING = _load_mapping(MAPPING_PATH)
 
 # ==================== Helpers ====================
+
 def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
     if not API_KEY_REQUIRED:
         return None
@@ -115,10 +123,13 @@ def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
     return None
 
 def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """
+    Returns (user_meta, normalized_qas)
+    """
     user = {
         "full_name":    payload.get("full_name") or payload.get("name") or "",
         "email":        payload.get("email") or "",
-        "phone_number": payload.get("phone_number") or "",
+        "phone_number": payload.get("phone_number") or payload.get("contact") or "",
         "birth_date":   payload.get("birth_date") or payload.get("dob") or payload.get("date") or "",
         "request_id":   payload.get("request_id") or payload.get("id") or "",
         "result_key":   payload.get("result_key") or "",
@@ -149,17 +160,15 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         })
         seen.add(q_key)
 
-    # Conditional: require relation if "Purchasing for" is Others
+    # Conditional (Others → relation required)
     purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
     if purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
         raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
 
-    # Enforce must-have keys
     missing = [k for k in mapping.must_have_keys if k not in seen]
     if missing:
         raise ValueError(json.dumps({"error": "Mandatory questions missing", "missing_keys": missing}))
 
-    # Stable sort: must-have order first, then others
     order = {k: i for i, k in enumerate(mapping.must_have_keys)}
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
     return user, normalized
@@ -170,15 +179,13 @@ def _flatten_qas_to_text(qas: List[Dict[str, str]]) -> str:
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     """
     Build a superset XML that satisfies multiple backend parsers:
-    - snake_case + TitleCase for person fields
-    - many date tag aliases
+    - snake_case + TitleCase + camelCase variants for key fields
     - multiple QA container spellings
-    - root-level QA list
-    - plain-text and JSON-string variants of Q/A (including <QNA>)
+    - consolidated text & JSON mirrors of QA
     """
     req = Element("Request")
 
-    # IDs / person meta in multiple casings/aliases
+    # IDs / meta (duplicate with common aliases)
     for tag in ("request_id", "RequestId", "RequestID"):
         SubElement(req, tag).text = user.get("request_id", "")
     for tag in ("result_key", "ResultKey"):
@@ -190,18 +197,16 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     for tag in ("phone_number", "PhoneNumber", "contact", "Contact"):
         SubElement(req, tag).text = user.get("phone_number", "")
 
-    # Date aliases
+    # Date aliases used by different backends
     date_val = user.get("birth_date", "")
     for tag in ("date_of_birth", "DateOfBirth", "dob", "DOB", "date", "Date"):
         SubElement(req, tag).text = date_val
 
-    # QA containers with common spellings/casings
+    # QA containers (snake_case, TitleCase, camelCase)
     containers = [
         ("question_answers", "qa", "question", "answer"),
-        ("QuestionAnswers", "QA", "Question", "Answer"),
-        ("questionAnswers", "qa", "question", "answer"),
-        ("questionanswers", "qa", "question", "answer"),
-        ("Questionanswers", "QA", "Question", "Answer"),
+        ("QuestionAnswers",   "QA", "Question", "Answer"),
+        ("questionAnswers",   "qa", "question", "answer"),
     ]
     for cont_name, qa_tag, q_tag, a_tag in containers:
         cont = SubElement(req, cont_name)
@@ -210,24 +215,18 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
             SubElement(qa_el, q_tag).text = qa["question_text"]
             SubElement(qa_el, a_tag).text = qa["answer_text"]
 
-    # Root-level QA items
-    for qa in qas:
-        qa_el = SubElement(req, "QA")
-        SubElement(qa_el, "Question").text = qa["question_text"]
-        SubElement(qa_el, "Answer").text = qa["answer_text"]
-
-    # Consolidated plain-text variants (add QNA + aliases)
+    # Consolidated text mirrors (many backends look for these)
     flat = _flatten_qas_to_text(qas)
     for tag in ("qna_text", "QNA", "qna", "Qna",
                 "question_answers_text", "QuestionAnswersText", "questionAnswersText"):
         SubElement(req, tag).text = flat
 
-    # JSON-string variants (some backends parse JSON from XML nodes)
+    # JSON mirrors (snake, TitleCase, camel)
     qa_json = json.dumps(
         [{"question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
         ensure_ascii=False
     )
-    for tag in ("question_answers_json", "QuestionAnswersJson"):
+    for tag in ("question_answers_json", "QuestionAnswersJson", "questionAnswersJson"):
         SubElement(req, tag).text = qa_json
 
     return tostring(req, encoding="unicode")
@@ -240,26 +239,26 @@ def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
     logger.debug("XML cid=%s payload=%s", cid, xml_body)
 
     resp = HTTP.post(create_url, data=xml_body.encode("utf-8"), headers=headers, timeout=BACKEND_TIMEOUT_S)
-    if resp.status_code >= 400:
-        raise RuntimeError(f"Backend createRequest failed: {resp.status_code} {resp.text}")
 
+    # NOTE: some backends return 200 with an error object; others return 4xx/5xx.
+    # We pass through whatever they return so you can see it in 'backend.backend_create'.
     try:
-        create_json = resp.json()
+        payload = resp.json()
     except Exception:
-        # If backend returns XML/plain text, pass-through
-        return {"backend_raw": resp.text}
+        payload = {"raw": resp.text}
 
-    # Common response id keys
-    response_id = (create_json.get("response_id") or
-                   create_json.get("ResponseId") or
-                   create_json.get("id") or
-                   create_json.get("Id"))
+    if resp.status_code >= 400:
+        return {"backend_create": {"status_code": resp.status_code, **payload}}
 
+    # If backend already replied with a final body (no id), just surface it.
+    response_id = (payload.get("response_id") or
+                   payload.get("ResponseId") or
+                   payload.get("id") or
+                   payload.get("Id"))
     if not response_id:
-        # Some backends return final payload immediately
-        return {"backend_create": create_json}
+        return {"backend_create": payload}
 
-    # Poll fetch endpoint with a few param name variants
+    # Poll fetch endpoint
     fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
     deadline = time.time() + BACKEND_TIMEOUT_S
     last = None
@@ -273,13 +272,10 @@ def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
     while time.time() < deadline:
         for params in param_variants:
             r = HTTP.get(fetch_url, params=params, headers={"Accept": "application/json"}, timeout=BACKEND_TIMEOUT_S)
-            if r.status_code >= 400:
-                last = {"status_code": r.status_code, "body": r.text}
-                continue
             try:
                 data = r.json()
             except Exception as e:
-                raise RuntimeError(f"Error parsing fetchResponse: {e}")
+                return {"backend_fetch_error": f"Error parsing fetchResponse: {e}", "status_code": r.status_code, "body": r.text}
 
             last = data
             status = str(data.get("status") or data.get("Status") or "").lower()
@@ -296,6 +292,7 @@ def _json_error(status: int, code: str, message: str, details: Optional[Dict[str
     return jsonify(payload), status
 
 # ==================== Hooks ====================
+
 @app.before_request
 def _before():
     g.cid = request.headers.get("x-request-id") or str(uuid.uuid4())
@@ -311,21 +308,10 @@ def _after(resp):
     return resp
 
 # ==================== Routes ====================
-@app.get("/")
-def index():
-    return jsonify({
-        "service": "ring-style-adapter",
-        "status": "ok",
-        "endpoints": {
-            "GET /health": "Basic liveness",
-            "GET /ready": "Mapping loaded and ready",
-            "POST /adapter": "Send UI JSON here (Content-Type: application/json)"
-        }
-    })
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "service": "adapter"})
+    return jsonify({"status": "ok", "service": "adapter", "mapping_loaded": MAPPING is not None})
 
 @app.get("/ready")
 def ready():
@@ -342,6 +328,7 @@ def adapter():
     if MAPPING is None:
         return _json_error(503, "not_ready", "Mapping not loaded")
 
+    # parse JSON
     try:
         payload = request.get_json(force=True, silent=False)
         if not isinstance(payload, dict):
@@ -349,6 +336,7 @@ def adapter():
     except Exception as e:
         return _json_error(400, "bad_json", f"Invalid JSON: {e}")
 
+    # normalize
     try:
         user, qas = _validate(payload, MAPPING)
     except ValueError as ve:
@@ -357,7 +345,7 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
-    # Normalization-only path (no backend call)
+    # normalize_only mode (no backend call)
     if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
         return jsonify({
             "status": "ok",
@@ -367,7 +355,7 @@ def adapter():
             "correlation_id": g.cid,
         })
 
-    # Build XML and call backend
+    # build XML & call backend
     xml_body = _xml_superset(user, qas)
     try:
         backend_result = _call_backend(xml_body, g.cid)
@@ -386,5 +374,4 @@ def adapter():
     })
 
 if __name__ == "__main__":
-    # Local dev only. Azure will run via gunicorn: `gunicorn -w 2 -b 0.0.0.0:8000 app:app`
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
