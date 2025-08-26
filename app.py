@@ -22,6 +22,7 @@ def _getenv(name: str, default: Optional[str] = None, required: bool = False) ->
 
 BACKEND_BASE_URL    = _getenv("BACKEND_BASE_URL", required=True).rstrip("/")
 CREATE_PATH         = _getenv("BACKEND_CREATE_PATH", "/createRequest")
+CREATE_JSON_PATH    = _getenv("BACKEND_CREATE_JSON_PATH", "/createRequestJSON")  # fallback path
 FETCH_PATH          = _getenv("BACKEND_FETCH_PATH", "/fetchResponse")
 BACKEND_TIMEOUT_S   = int(_getenv("BACKEND_TIMEOUT_SEC", "25"))
 MAPPING_PATH        = _getenv("MAPPING_PATH", "/home/site/wwwroot/mapping.config.json")
@@ -276,7 +277,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         "phone_number": payload.get("phone_number") or payload.get("contact") or "",
         "birth_date":   payload.get("birth_date") or payload.get("dob") or payload.get("date") or "",
         "request_id":   payload.get("request_id") or payload.get("id") or "",
-        "result_key":   payload.get("result_key") or "",  # may be auto-generated later
+        "result_key":   payload.get("result_key") or "",  # may be auto generated later
         "test_mode":    payload.get("test_mode") or "live",
     }
 
@@ -291,7 +292,6 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     for idx, item in enumerate(raw_qas):
         q_text_in, a_text_in = _extract_question_and_answer(item)
 
-        # Prefer label-based mapping; fallback to index into must_have
         q_key = mapping.resolve_q_key(q_text_in) if q_text_in else None
         if not q_key and idx < len(mapping.must_have_keys):
             q_key = mapping.must_have_keys[idx]
@@ -302,7 +302,6 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
             raise ValueError(json.dumps({"error": "Unknown question", "question_received": q_text_in or f'index_{idx}'}))
 
         meta = mapping.questions.get(q_key, {"canonical_label": q_key})
-
         freeform = _normalize_freeform(q_key, a_text_in)
         normalized.append({
             "key": q_key,
@@ -333,15 +332,12 @@ def _nonempty(val: Optional[str], fallback: str) -> str:
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> Tuple[str, str]:
     """
     Build XML expected by backend AND return the (unique) result_key we used.
-
     Backend reads:
       <full_name>, <email>, <phone_number>, <result_key>, <date>, <questionAnswers>
     """
     incoming = (user.get("result_key") or user.get("request_id") or "").strip()
-    # ALWAYS make result_key unique (prevents DB duplicate on backend)
-    result_key = _gen_result_key(incoming)
+    result_key = _gen_result_key(incoming)  # ALWAYS unique to avoid DB duplicates
 
-    # SAFE placeholders for possibly empty fields (avoid NOT NULL issues)
     full_name    = _nonempty(user.get("full_name") or user.get("name"), "Unknown User")
     email        = _nonempty(user.get("email"), "unknown@example.invalid")
     phone_number = _nonempty(user.get("phone_number") or user.get("contact"), "N/A")
@@ -364,7 +360,7 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> Tuple[str,
 
     return tostring(req, encoding="unicode"), result_key
 
-# ==================== Backend calling ====================
+# ==================== Backend calling (XML → JSON fallback) ====================
 
 def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]]) -> float:
     ra = resp.headers.get("Retry-After")
@@ -396,92 +392,147 @@ def _extract_response_id(create_json: Optional[Dict[str, Any]], headers: Dict[st
             val = create_json.get(k)
             if val and str(val).strip():
                 return str(val).strip()
-    # If your backend uses Location to convey ID, parse here
     return None
 
-def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
-    create_url = f"{BACKEND_BASE_URL}{CREATE_PATH}"
-    headers = {"Content-Type": "application/xml", "Accept": "application/json, */*"}
+def _as_json_backend_payload(effective_result_key: str, user: Dict[str, Any], qas: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Shape body for /createRequestJSON per your backend."""
+    questions = [qa.get("question_text", "") or "" for qa in qas]
+    answers   = [qa.get("answer_text", "")   or "" for qa in qas]
+    return {
+        "request_id":   effective_result_key,
+        "email":        (user.get("email") or "unknown@example.invalid"),
+        "name":         (user.get("full_name") or user.get("name") or "Unknown User"),
+        "phone_number": (user.get("phone_number") or user.get("contact") or "N/A"),
+        "birth_date":   (user.get("birth_date") or user.get("dob") or user.get("date") or "1970-01-01"),
+        "questions":    questions,
+        "answers":      answers,
+    }
 
-    logger.info("POST %s cid=%s", create_url, cid)
-    if LOG_XML_ALWAYS:
-        logger.info("XML cid=%s payload=%s", cid, xml_body)
+def _call_backend(xml_body: str, cid: str, *, effective_result_key: str, user: Dict[str, Any], qas: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    1) Try XML /createRequest (current path)
+    2) On 4xx/5xx -> Try JSON /createRequestJSON with body your backend expects
+    """
+    create_xml_url  = f"{BACKEND_BASE_URL}{CREATE_PATH}"
+    create_json_url = f"{BACKEND_BASE_URL}{CREATE_JSON_PATH}"
+    headers_xml  = {"Content-Type": "application/xml", "Accept": "application/json, */*"}
+    headers_json = {"Content-Type": "application/json", "Accept": "application/json, */*"}
 
-    resp = HTTP.post(create_url, data=xml_body.encode("utf-8"), headers=headers, timeout=BACKEND_TIMEOUT_S)
+    # -------- 1) XML first --------
+    try:
+        resp = HTTP.post(create_xml_url, data=xml_body.encode("utf-8"), headers=headers_xml, timeout=BACKEND_TIMEOUT_S)
+    except Exception as e:
+        xml_first_try = {"transport_error": str(e)}
+        resp = None
+    else:
+        xml_first_try = {"status_code": resp.status_code}
+        if resp.status_code < 400:
+            try:
+                create_json = resp.json()
+            except Exception:
+                return {"backend_raw": resp.text, "polling_with": None, "path": "xml_first_try"}
 
-    # Surface backend error body (do NOT 502 the caller on purpose)
-    if resp.status_code >= 400:
-        return {"backend_create": {"status_code": resp.status_code, "detail": resp.text, "headers": dict(resp.headers)}, "polling_with": None}
+            def _is_final(d: Dict[str, Any]) -> bool:
+                if "data" in d or "result" in d:
+                    return True
+                status = str(d.get("status") or d.get("Status") or "").lower()
+                if status in ("done","completed","ok","success","ready","finished"):
+                    return True
+                if d.get("done") is True or d.get("ready") is True or d.get("is_ready") is True:
+                    return True
+                return False
+
+            if _is_final(create_json):
+                return {"backend_final": create_json, "polling_with": None, "path": "xml_first_try"}
+
+            rid = _extract_response_id(create_json, resp.headers)
+            if not rid:
+                return {"backend_create": create_json, "polling_with": None, "path": "xml_first_try"}
+
+            # Poll by response_id
+            fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
+            deadline = time.time() + BACKEND_TIMEOUT_S
+            last: Any = None
+            while time.time() < deadline:
+                r = HTTP.get(fetch_url, params={"response_id": rid}, headers={"Accept": "application/json, */*"}, timeout=BACKEND_TIMEOUT_S)
+                if r.status_code == 202:
+                    time.sleep(_get_retry_after(r, None)); continue
+                if r.status_code >= 400:
+                    last = {"status_code": r.status_code, "body": r.text}; time.sleep(0.7); continue
+                try:
+                    data = r.json()
+                except Exception:
+                    return {"backend_raw": r.text, "polling_with": "response_id", "fetch_target": {"mode": "id", "id": rid, "id_hint": "response_id"}, "path": "xml_first_try"}
+                status = str(data.get("status") or data.get("Status") or "").lower()
+                if "data" in data or "result" in data or status in ("done","completed","ok","success","ready","finished") or data.get("done") is True:
+                    return {"backend_final": data, "polling_with": "response_id", "fetch_target": {"mode": "id", "id": rid, "id_hint": "response_id"}, "path": "xml_first_try"}
+                time.sleep(_get_retry_after(r, data))
+            return {"backend_fetch_timeout": True, "last": last, "fetch_target": {"mode": "id", "id": rid, "id_hint": "response_id"}, "polling_with": "response_id", "path": "xml_first_try"}
+        else:
+            xml_first_try["detail"] = resp.text  # surface backend error
+
+    # -------- 2) JSON fallback --------
+    json_body = _as_json_backend_payload(effective_result_key, user, qas)
+    try:
+        rj = HTTP.post(create_json_url, json=json_body, headers=headers_json, timeout=BACKEND_TIMEOUT_S)
+    except Exception as e:
+        return {
+            "xml_first_try": xml_first_try,
+            "json_fallback": {"transport_error": str(e), "body_sent": json_body},
+            "polling_with": None,
+            "path": "json_fallback"
+        }
+
+    if rj.status_code >= 400:
+        return {
+            "xml_first_try": xml_first_try,
+            "json_fallback": {"status_code": rj.status_code, "detail": rj.text, "body_sent": json_body},
+            "polling_with": None,
+            "path": "json_fallback"
+        }
 
     try:
-        create_json = resp.json()
+        cj = rj.json()
     except Exception:
-        return {"backend_raw": resp.text, "polling_with": None}
+        return {"backend_raw": rj.text, "polling_with": None, "path": "json_fallback"}
 
-    def _is_final(d: Dict[str, Any]) -> bool:
+    def _is_final2(d: Dict[str, Any]) -> bool:
         if "data" in d or "result" in d:
             return True
         status = str(d.get("status") or d.get("Status") or "").lower()
-        if status in ("done", "completed", "ok", "success", "ready", "finished"):
+        if status in ("done","completed","ok","success","ready","finished"):
             return True
         if d.get("done") is True or d.get("ready") is True or d.get("is_ready") is True:
             return True
         return False
 
-    if _is_final(create_json):
-        return {"backend_final": create_json, "polling_with": None}
+    if _is_final2(cj):
+        return {"backend_final": cj, "polling_with": None, "path": "json_fallback"}
 
-    response_id = _extract_response_id(create_json, resp.headers)
-    if not response_id:
-        return {"backend_create": create_json, "polling_with": None}
+    rid = _extract_response_id(cj, rj.headers)
+    if not rid:
+        return {"backend_create": cj, "polling_with": None, "path": "json_fallback"}
 
-    # Poll by response_id
+    # Poll by response_id (fallback path)
     fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
     deadline = time.time() + BACKEND_TIMEOUT_S
     last: Any = None
-
     while time.time() < deadline:
+        rr = HTTP.get(fetch_url, params={"response_id": rid}, headers={"Accept": "application/json, */*"}, timeout=BACKEND_TIMEOUT_S)
+        if rr.status_code == 202:
+            time.sleep(_get_retry_after(rr, None)); continue
+        if rr.status_code >= 400:
+            last = {"status_code": rr.status_code, "body": rr.text}; time.sleep(0.7); continue
         try:
-            r = HTTP.get(fetch_url, params={"response_id": response_id},
-                         headers={"Accept": "application/json, */*"}, timeout=BACKEND_TIMEOUT_S)
+            data = rr.json()
+        except Exception:
+            return {"backend_raw": rr.text, "polling_with": "response_id", "fetch_target": {"mode": "id", "id": rid, "id_hint": "response_id"}, "path": "json_fallback"}
+        st = str(data.get("status") or data.get("Status") or "").lower()
+        if "data" in data or "result" in data or st in ("done","completed","ok","success","ready","finished") or data.get("done") is True:
+            return {"backend_final": data, "polling_with": "response_id", "fetch_target": {"mode": "id", "id": rid, "id_hint": "response_id"}, "path": "json_fallback"}
+        time.sleep(_get_retry_after(rr, data))
 
-            if r.status_code == 202:
-                time.sleep(_get_retry_after(r, None))
-                continue
-
-            ctype = (r.headers.get("Content-Type") or "").lower()
-            if r.status_code == 200 and "application/json" not in ctype:
-                body_text = r.text.strip() if isinstance(r.text, str) else ""
-                if not body_text or "list index out of range" in body_text.lower():
-                    time.sleep(0.7); continue
-                return {"backend_raw": body_text, "polling_with": "response_id",
-                        "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}}
-
-            if r.status_code >= 400:
-                last = {"status_code": r.status_code, "body": r.text, "params_tried": {"response_id": response_id}}
-                time.sleep(0.7); continue
-
-            try:
-                data = r.json()
-            except Exception:
-                return {"backend_raw": r.text, "polling_with": "response_id",
-                        "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}}
-
-            last = data
-            status = str(data.get("status") or data.get("Status") or "").lower()
-            if status in ("done","completed","ok","success","ready","finished") or data.get("done") is True:
-                return {"backend_final": data, "polling_with": "response_id",
-                        "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}}
-
-            time.sleep(_get_retry_after(r, data))
-
-        except Exception as e:
-            last = {"exception": str(e)}
-            time.sleep(0.7)
-
-    return {"backend_fetch_timeout": True, "last": last,
-            "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
-            "polling_with": "response_id"}
+    return {"backend_fetch_timeout": True, "last": last, "fetch_target": {"mode": "id", "id": rid, "id_hint": "response_id"}, "polling_with": "response_id", "path": "json_fallback"}
 
 # ==================== Misc helpers ====================
 
@@ -570,7 +621,7 @@ def adapter():
         return jsonify(out)
 
     try:
-        backend_result = _call_backend(xml_body, g.cid)
+        backend_result = _call_backend(xml_body, g.cid, effective_result_key=effective_result_key, user=user, qas=qas)
     except Exception as e:
         logger.exception("Backend call failed cid=%s", g.cid)
         body = {"details": str(e), "xml": xml_body} if LOG_XML_ALWAYS else {"details": str(e)}
@@ -586,7 +637,6 @@ def adapter():
         "correlation_id": g.cid,
     }
 
-    # make polling intent explicit if present
     if isinstance(result_payload.get("backend"), dict):
         bt = result_payload["backend"]
         if isinstance(bt.get("fetch_target"), dict):
