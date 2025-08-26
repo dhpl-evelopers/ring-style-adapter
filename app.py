@@ -29,9 +29,7 @@ API_KEY_REQUIRED    = _getenv("API_KEY_REQUIRED", "false").lower() == "true"
 MAX_CONTENT_LENGTH  = int(_getenv("MAX_CONTENT_LENGTH", str(512 * 1024)))
 LOG_LEVEL           = _getenv("LOG_LEVEL", "INFO").upper()
 LOG_XML_ALWAYS      = _getenv("LOG_XML_ALWAYS", "false").lower() == "true"
-
-# Accept partial answers (don’t 400 on missing_keys)
-ACCEPT_PARTIAL      = _getenv("ACCEPT_PARTIAL", "true").lower() == "true"
+ACCEPT_PARTIAL      = _getenv("ACCEPT_PARTIAL", "true").lower() == "true"  # don't 400 on missing keys
 
 # ==================== App / Logging ====================
 
@@ -70,6 +68,7 @@ class Mapping:
         self.questions: Dict[str, Dict[str, Any]] = dict(raw.get("questions", {}))
         self.label_to_key: Dict[str, str] = {}
         self.normalized_options: Dict[str, Dict[str, str]] = {}
+
         for q_key, meta in self.questions.items():
             labels = [meta.get("canonical_label", "")] + meta.get("labels", [])
             for lbl in labels:
@@ -77,7 +76,7 @@ class Mapping:
                     self.label_to_key[lbl.strip().lower()] = q_key
             opts = meta.get("options")
             if isinstance(opts, list):
-                norm = {}
+                norm: Dict[str, str] = {}
                 for o in opts:
                     if isinstance(o, str):
                         norm[o.strip().lower()] = o
@@ -114,7 +113,7 @@ def _load_mapping(path: str) -> Optional[Mapping]:
 
 MAPPING = _load_mapping(MAPPING_PATH)
 
-# ==================== Flex Q&A helpers ====================
+# ==================== Flex helpers ====================
 
 def _flex_str(x: Any) -> str:
     if x is None:
@@ -132,35 +131,40 @@ def _pick_first_truthy(*vals):
         return v
     return None
 
+def _ensure_list_qas(raw_qas: Any) -> List[Any]:
+    if isinstance(raw_qas, list):
+        return raw_qas
+    if isinstance(raw_qas, dict):
+        for k in ("qas", "items", "data"):
+            v = raw_qas.get(k)
+            if isinstance(v, list):
+                return v
+    if isinstance(raw_qas, str):
+        s = raw_qas.strip()
+        if s:
+            try:
+                val = json.loads(s)
+                if isinstance(val, list):
+                    return val
+            except Exception:
+                pass
+    return []
+
 def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
-    """
-    Accept multiple UI shapes and return (question_text, answer_text).
-    """
+    """Accept many UI shapes and return (question_text, answer_text)."""
     if not isinstance(item, dict):
         return "", ""
 
-    # QUESTION candidates
     q = _pick_first_truthy(
-        item.get("question"),
-        item.get("q"),
-        item.get("label"),
-        item.get("title"),
-        item.get("text"),
-        item.get("id"),
-        item.get("key"),
+        item.get("question"), item.get("q"), item.get("label"), item.get("title"),
+        item.get("text"), item.get("id"), item.get("key"),
     )
 
-    # ANSWER candidates
     a = _pick_first_truthy(
-        item.get("answer"),
-        item.get("value"),
-        item.get("option"),
-        item.get("selected"),
-        item.get("choice"),
-        item.get("val"),
+        item.get("answer"), item.get("value"), item.get("option"),
+        item.get("selected"), item.get("choice"), item.get("val"),
     )
 
-    # NESTED selectedOption.value
     if a is None:
         sel = _pick_first_truthy(
             (item.get("selectedOption") or {}).get("value") if isinstance(item.get("selectedOption"), dict) else None,
@@ -170,7 +174,6 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
         if sel is not None:
             a = sel
 
-    # LISTS: answers/options/choices (pick selected or first)
     if a is None:
         for key in ("answers", "options", "choices"):
             arr = item.get(key)
@@ -199,111 +202,72 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
 
     return _flex_str(q), _flex_str(a)
 
-def _ensure_list_qas(raw_qas: Any) -> List[Any]:
-    if isinstance(raw_qas, list):
-        return raw_qas
-    if isinstance(raw_qas, dict):
-        for k in ("qas", "items", "data"):
-            v = raw_qas.get(k)
-            if isinstance(v, list):
-                return v
-    if isinstance(raw_qas, str):
-        s = raw_qas.strip()
-        if s:
-            try:
-                val = json.loads(s)
-                if isinstance(val, list):
-                    return val
-            except Exception:
-                pass
-    return []
-
-# ==================== Free-form Normalizer ====================
+# ==================== Free-form normalization ====================
 
 def _normalize_freeform(q_key: str, text: str) -> str:
-    """
-    Map free-form sentences/phrases to canonical options where sensible.
-    """
     if not text:
         return text
-
     s = text.strip().lower()
-    def contains(*words): return any(w in s for w in words)
+    def has(*words): return any(w in s for w in words)
 
     if q_key == "q1_purchasing_for":
-        if contains("myself", "for me", "self", "me only", "i am buying"):
-            return "Self"
-        if contains("friend", "wife", "husband", "gf", "bf", "mother", "mom", "father", "dad", "sister", "brother",
-                    "partner", "fiancé", "fiance"):
-            return "Others"
+        if has("myself", "for me", "self", "me only"): return "Self"
+        if has("wife", "husband", "mother", "father", "friend", "gf", "bf", "partner", "fiancé", "fiance"): return "Others"
 
     if q_key == "q2_gender":
-        if contains("female", "woman", "girl", "she", "her"): return "Female"
-        if contains("male", "man", "boy", "he", "him"):       return "Male"
+        if has("female", "woman", "girl", "she", "her"): return "Female"
+        if has("male", "man", "boy", "he", "him"): return "Male"
 
-    if q_key == "q3_profession":
-        return text  # keep free-form
+    if q_key == "q3_profession": return text
 
     if q_key == "q4_occasion":
-        if contains("wedding", "marriage", "shaadi", "bride", "groom"): return "Wedding"
-        if contains("engagement", "ring ceremony", "roka", "sagai"):    return "Engagement"
-        if contains("party", "birthday", "anniversary", "festival", "diwali", "eid", "christmas"): return "Party"
-        if contains("daily", "office", "work", "every day", "everyday", "casual"):                 return "Daily wear"
+        if has("wedding", "marriage", "bride", "groom", "shaadi"): return "Wedding"
+        if has("engagement", "ring ceremony", "roka", "sagai"):   return "Engagement"
+        if has("daily", "office", "work", "casual"):               return "Daily wear"
+        if has("party", "birthday", "festival", "anniversary"):    return "Party"
 
     if q_key == "q5_purpose":
-        if contains("daily", "every day", "everyday", "office", "work"): return "Daily wear"
-        if contains("gift"):         return "Gifting"
-        if contains("engagement"):   return "Engagement"
-        if contains("wedding"):      return "Wedding"
-        if contains("party", "event", "occasion"): return "Occasional wear"
+        if has("daily", "routine", "office", "work"):              return "Daily wear"
+        if has("gift"):                                            return "Gifting"
+        if has("wedding"):                                         return "Wedding"
+        if has("engagement"):                                      return "Engagement"
+        if has("party", "occasion", "event"):                      return "Occasional wear"
 
     if q_key == "q6_day":
-        if contains("busy", "hectic", "packed", "back to back", "lots of activities", "lot of activities"):
-            return "Busy With a lot of Activities"
-        if contains("relaxed", "calm", "laid back", "easy"):
-            return "Relaxed & Easy-going"
+        if has("busy", "hectic", "packed", "lot of activities"):  return "Busy With a lot of Activities"
+        if has("relaxed", "easy", "laid back"):                    return "Relaxed & Easy-going"
 
     if q_key == "q7_weekend":
-        if contains("social", "friends", "outing", "go out", "party", "hangout", "brunch", "movies", "shopping"):
-            return "Going out & socialising"
-        if contains("home", "stay in", "me-time", "me time", "alone", "read", "reading", "netflix", "rest"):
-            return "Staying in & relaxing"
+        if has("social", "party", "go out", "friends", "outing"): return "Going out & socialising"
+        if has("home", "stay in", "me-time", "read", "netflix"):  return "Staying in & relaxing"
 
     if q_key == "q8_work_dress":
-        if contains("designer", "chic", "stylish", "trendy", "fashion"): return "Stylish & Chic: Designer Clothing"
-        if contains("formal", "business", "smart"):                      return "Classic Formal"
-        if contains("casual", "comfortable", "comfy"):                   return "Smart Casuals"
+        if has("designer", "chic", "stylish", "fashion"):          return "Stylish & Chic: Designer Clothing"
+        if has("formal", "business", "smart"):                     return "Classic Formal"
+        if has("casual", "comfortable", "comfy"):                  return "Smart Casuals"
 
     if q_key == "q9_line":
-        if contains("alone", "on my own", "by myself", "quiet", "independent"): return "You prefer to be on your own"
-        if contains("chat", "talk", "friends", "social", "people"):             return "You like to chat with people around"
+        if has("alone", "by myself", "independent"):               return "You prefer to be on your own"
+        if has("chat", "talk", "friends", "social"):               return "You like to chat with people around"
 
     if q_key == "q10_painting":
-        if contains("meaning", "story", "symbolism", "origin", "heritage"):
-            return "You value the meaning of the art & origin"
-        if contains("color", "colour", "colors", "colours", "vibrant", "aesthetic", "look"):
-            return "You value the colors & aesthetics"
+        if has("meaning", "story", "symbol", "origin", "heritage"):return "You value the meaning of the art & origin"
+        if has("color", "colour", "vibrant", "aesthetic", "look"): return "You value the colors & aesthetics"
 
     if q_key == "q11_emergency":
-        if contains("arrange care", "care for my mother", "attend the meeting", "both", "manage both"):
-            return "You will arrange care for your mother & attend the meeting"
-        if contains("mother", "mom", "mum") and contains("stay", "skip", "miss"):
-            return "You will stay with your mother"
-        if contains("meeting") and contains("skip", "miss") and not contains("mother", "mom", "mum"):
-            return "You will attend the meeting"
+        if has("arrange care", "care for my mother", "both"):      return "You will arrange care for your mother & attend the meeting"
+        if has("stay", "skip", "miss") and has("mother", "mom"):   return "You will stay with your mother"
+        if has("meeting") and has("attend"):                       return "You will attend the meeting"
 
-    if q_key == "q12_drive":
-        return text  # keep free-form
+    if q_key == "q12_drive": return text
 
     if q_key == "q13_last_minute_plans":
-        if contains("dislike", "hate", "prefer planning", "plan ahead", "not a fan", "avoid", "no last"):
-            return "You dislike last-minute plans & prefer planning ahead"
-        if contains("spontaneous", "go with the flow", "last minute", "impulsive", "love surprises"):
-            return "You enjoy spontaneous last-minute plans"
+        if has("dislike", "hate", "prefer planning", "plan ahead"):return "You dislike last-minute plans & prefer planning ahead"
+        if has("spontaneous", "go with the flow", "last minute"):  return "You enjoy spontaneous last-minute plans"
 
     return text
 
-# ==================== Validation (flex/partial) ====================
+# ==================== Validation (flex / partial) ====================
 
 def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
     user = {
@@ -312,13 +276,12 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         "phone_number": payload.get("phone_number") or payload.get("contact") or "",
         "birth_date":   payload.get("birth_date") or payload.get("dob") or payload.get("date") or "",
         "request_id":   payload.get("request_id") or payload.get("id") or "",
-        "result_key":   payload.get("result_key") or "",
+        "result_key":   payload.get("result_key") or "",  # may be auto-generated later
         "test_mode":    payload.get("test_mode") or "live",
     }
 
     raw_qas_input = payload.get("questionAnswers") or payload.get("question_answers") or []
     raw_qas = _ensure_list_qas(raw_qas_input)
-
     if not isinstance(raw_qas, list):
         raise ValueError(json.dumps({"error": "questionAnswers must be a list or JSON string"}))
 
@@ -328,7 +291,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     for idx, item in enumerate(raw_qas):
         q_text_in, a_text_in = _extract_question_and_answer(item)
 
-        # Prefer label mapping; fallback to positional (must_have order)
+        # Prefer label-based mapping; fallback to index order of must_have.
         q_key = mapping.resolve_q_key(q_text_in) if q_text_in else None
         if not q_key and idx < len(mapping.must_have_keys):
             q_key = mapping.must_have_keys[idx]
@@ -339,6 +302,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
             raise ValueError(json.dumps({"error": "Unknown question", "question_received": q_text_in or f'index_{idx}'}))
 
         meta = mapping.questions.get(q_key, {"canonical_label": q_key})
+
         freeform = _normalize_freeform(q_key, a_text_in)
         normalized.append({
             "key": q_key,
@@ -356,19 +320,20 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
     return user, normalized, validation
 
-# ==================== Helpers ====================
+# ==================== XML builder ====================
 
-def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
-    if not API_KEY_REQUIRED:
-        return None
-    key = headers.get("x-api-key") or headers.get("X-API-Key")
-    if not key:
-        return "Missing API key header 'x-api-key'."
-    return None
+def _gen_result_key(seed: Optional[str] = None) -> str:
+    base = seed or time.strftime("%Y%m%d-%H%M%S")
+    return f"rk-{base}-{uuid.uuid4().hex[:6]}"
 
-# ---------- XML for backend ----------
-def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
-    result_key = (user.get("result_key") or user.get("request_id") or str(uuid.uuid4())).strip()
+def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> Tuple[str, str]:
+    """
+    Build XML expected by backend AND return the (possibly generated) result_key we used.
+    """
+    result_key = (user.get("result_key") or user.get("request_id") or "").strip()
+    if not result_key:
+        result_key = _gen_result_key()
+
     qa_payload = [
         {"question": qa.get("question_text", "") or "",
          "selectedOption": {"value": qa.get("answer_text", "") or ""}}
@@ -383,7 +348,10 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     SubElement(req, "result_key").text   = result_key
     SubElement(req, "date").text         = user.get("birth_date", "") or user.get("dob", "") or user.get("date", "") or ""
     SubElement(req, "questionAnswers").text = qa_json_str
-    return tostring(req, encoding="unicode")
+
+    return tostring(req, encoding="unicode"), result_key
+
+# ==================== Backend calling ====================
 
 def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]]) -> float:
     ra = resp.headers.get("Retry-After")
@@ -417,10 +385,11 @@ def _extract_response_id(create_json: Optional[Dict[str, Any]], headers: Dict[st
                 return str(val).strip()
     loc = headers.get("Location") or headers.get("location")
     if loc and str(loc).strip():
+        # if your backend puts the id in a Location URL, parse here if needed
         return None
     return None
 
-def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, Any]:
+def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
     create_url = f"{BACKEND_BASE_URL}{CREATE_PATH}"
     headers = {"Content-Type": "application/xml", "Accept": "application/json, */*"}
 
@@ -428,12 +397,10 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
     if LOG_XML_ALWAYS:
         logger.info("XML cid=%s payload=%s", cid, xml_body)
 
-    # CREATE
     resp = HTTP.post(create_url, data=xml_body.encode("utf-8"), headers=headers, timeout=BACKEND_TIMEOUT_S)
     if resp.status_code >= 400:
         raise RuntimeError(f"Backend createRequest failed: {resp.status_code} {resp.text}")
 
-    create_json: Optional[Dict[str, Any]] = None
     try:
         create_json = resp.json()
     except Exception:
@@ -443,7 +410,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
         if "data" in d or "result" in d:
             return True
         status = str(d.get("status") or d.get("Status") or "").lower()
-        if status in ("done","completed","ok","success","ready","finished"):
+        if status in ("done", "completed", "ok", "success", "ready", "finished"):
             return True
         if d.get("done") is True or d.get("ready") is True or d.get("is_ready") is True:
             return True
@@ -452,23 +419,19 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
     if _is_final(create_json):
         return {"backend_final": create_json, "polling_with": None}
 
-    # Poll only if explicit response_id is returned
     response_id = _extract_response_id(create_json, resp.headers)
     if not response_id:
         return {"backend_create": create_json, "polling_with": None}
 
+    # Poll by response_id
     fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
     deadline = time.time() + BACKEND_TIMEOUT_S
     last: Any = None
 
     while time.time() < deadline:
         try:
-            r = HTTP.get(
-                fetch_url,
-                params={"response_id": response_id},
-                headers={"Accept": "application/json, */*"},
-                timeout=BACKEND_TIMEOUT_S,
-            )
+            r = HTTP.get(fetch_url, params={"response_id": response_id},
+                         headers={"Accept": "application/json, */*"}, timeout=BACKEND_TIMEOUT_S)
 
             if r.status_code == 202:
                 time.sleep(_get_retry_after(r, None))
@@ -478,36 +441,25 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
             if r.status_code == 200 and "application/json" not in ctype:
                 body_text = r.text.strip() if isinstance(r.text, str) else ""
                 if not body_text or "list index out of range" in body_text.lower():
-                    time.sleep(0.7)
-                    continue
-                return {
-                    "backend_raw": body_text,
-                    "polling_with": "response_id",
-                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
-                }
+                    time.sleep(0.7); continue
+                return {"backend_raw": body_text, "polling_with": "response_id",
+                        "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}}
 
             if r.status_code >= 400:
                 last = {"status_code": r.status_code, "body": r.text, "params_tried": {"response_id": response_id}}
-                time.sleep(0.7)
-                continue
+                time.sleep(0.7); continue
 
             try:
                 data = r.json()
             except Exception:
-                return {
-                    "backend_raw": r.text,
-                    "polling_with": "response_id",
-                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
-                }
+                return {"backend_raw": r.text, "polling_with": "response_id",
+                        "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}}
 
             last = data
             status = str(data.get("status") or data.get("Status") or "").lower()
             if status in ("done","completed","ok","success","ready","finished") or data.get("done") is True:
-                return {
-                    "backend_final": data,
-                    "polling_with": "response_id",
-                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
-                }
+                return {"backend_final": data, "polling_with": "response_id",
+                        "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}}
 
             time.sleep(_get_retry_after(r, data))
 
@@ -515,12 +467,19 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
             last = {"exception": str(e)}
             time.sleep(0.7)
 
-    return {
-        "backend_fetch_timeout": True,
-        "last": last,
-        "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
-        "polling_with": "response_id",
-    }
+    return {"backend_fetch_timeout": True, "last": last,
+            "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
+            "polling_with": "response_id"}
+
+# ==================== Misc helpers ====================
+
+def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
+    if not API_KEY_REQUIRED:
+        return None
+    key = headers.get("x-api-key") or headers.get("X-API-Key")
+    if not key:
+        return "Missing API key header 'x-api-key'."
+    return None
 
 def _json_error(status: int, code: str, message: str, details: Optional[Dict[str, Any]] = None):
     payload = {"status": "error", "error": {"code": code, "message": message}, "correlation_id": g.get("cid")}
@@ -581,23 +540,23 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
-    # Debug: normalization only
+    # Build XML (and ensure a result_key exists)
+    xml_body, effective_result_key = _xml_superset(user, qas)
+
+    # Debug-only: return normalized without calling backend
     if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
         return jsonify({
             "status": "ok",
-            "request_id": user["request_id"],
-            "result_key": user["result_key"],
+            "request_id": user.get("request_id", ""),
+            "result_key": effective_result_key,
             "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
             "validation": validation,
             "correlation_id": g.cid,
+            "xml_echo": xml_body if LOG_XML_ALWAYS else None
         })
 
-    xml_body = _xml_superset(user, qas)
-    if LOG_XML_ALWAYS:
-        logger.info("Built XML cid=%s: %s", g.cid, xml_body)
-
     try:
-        backend_result = _call_backend(xml_body, g.cid, user)
+        backend_result = _call_backend(xml_body, g.cid)
     except Exception as e:
         logger.exception("Backend call failed cid=%s", g.cid)
         body = {"details": str(e), "xml": xml_body} if LOG_XML_ALWAYS else {"details": str(e)}
@@ -605,14 +564,15 @@ def adapter():
 
     result_payload = {
         "status": "ok",
-        "request_id": user["request_id"],
-        "result_key": user["result_key"],  # echo only
+        "request_id": user.get("request_id", ""),
+        "result_key": effective_result_key,   # always present now
         "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
         "validation": validation,
         "backend": backend_result,
         "correlation_id": g.cid,
     }
 
+    # make polling intent explicit if present
     if isinstance(result_payload.get("backend"), dict):
         bt = result_payload["backend"]
         if isinstance(bt.get("fetch_target"), dict):
