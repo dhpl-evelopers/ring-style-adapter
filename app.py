@@ -30,8 +30,8 @@ MAX_CONTENT_LENGTH  = int(_getenv("MAX_CONTENT_LENGTH", str(512 * 1024)))
 LOG_LEVEL           = _getenv("LOG_LEVEL", "INFO").upper()
 LOG_XML_ALWAYS      = _getenv("LOG_XML_ALWAYS", "false").lower() == "true"
 
-# —— Option-1 hard standardization: never poll with result_key/request_id
-PREFER_RESULT_KEY_WHEN_NO_ID = False  # force response_id only
+# —— Option-1 hard standardization (never poll with result_key/request_id)
+PREFER_RESULT_KEY_WHEN_NO_ID = False
 
 # ==================== App / Logging ====================
 
@@ -171,36 +171,38 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
     return user, normalized
 
-# ---------- XML builder (PascalCase) ----------
+# ---------- XML builder (matches backend/main.py expectations) ----------
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     """
-    <Request>
-      <RequestId>...</RequestId>
-      <ResultKey>...</ResultKey>
-      <FullName>...</FullName>
-      <Email>...</Email>
-      <PhoneNumber>...</PhoneNumber>
-      <DateOfBirth>...</DateOfBirth>
-      <QuestionAnswers>
-        <QA><Question>..</Question><Answer>..</Answer></QA>
-        ...
-      </QuestionAnswers>
-    </Request>
+    Build XML that matches backend parsing in createRequest:
+
+      <Request>
+        <full_name>...</full_name>
+        <email>...</email>
+        <phone_number>...</phone_number>
+        <result_key>...</result_key>   # backend uses as request_id
+        <date>...</date>               # birth date
+        <questionAnswers>[...]</questionAnswers>  # stringified JSON with selectedOption.value
+      </Request>
     """
+    # Backend uses result_key as request_id. Ensure we always send one.
+    result_key = (user.get("result_key") or user.get("request_id") or str(uuid.uuid4())).strip()
+
+    # questionAnswers: [{"question":"...", "selectedOption":{"value":"..."}}]
+    qa_payload = [
+        {"question": qa.get("question_text", "") or "",
+         "selectedOption": {"value": qa.get("answer_text", "") or ""}}
+        for qa in qas
+    ]
+    qa_json_str = json.dumps(qa_payload, ensure_ascii=False)
+
     req = Element("Request")
-
-    SubElement(req, "RequestId").text    = user.get("request_id", "") or ""
-    SubElement(req, "ResultKey").text    = user.get("result_key", "") or ""
-    SubElement(req, "FullName").text     = user.get("full_name", "") or ""
-    SubElement(req, "Email").text        = user.get("email", "") or ""
-    SubElement(req, "PhoneNumber").text  = user.get("phone_number", "") or ""
-    SubElement(req, "DateOfBirth").text  = user.get("birth_date", "") or ""
-
-    qa_container = SubElement(req, "QuestionAnswers")
-    for qa in qas:
-        qa_el = SubElement(qa_container, "QA")
-        SubElement(qa_el, "Question").text = qa.get("question_text", "") or ""
-        SubElement(qa_el, "Answer").text   = qa.get("answer_text", "") or ""
+    SubElement(req, "full_name").text    = user.get("full_name", "") or user.get("name", "") or ""
+    SubElement(req, "email").text        = user.get("email", "") or ""
+    SubElement(req, "phone_number").text = user.get("phone_number", "") or user.get("contact", "") or ""
+    SubElement(req, "result_key").text   = result_key
+    SubElement(req, "date").text         = user.get("birth_date", "") or user.get("dob", "") or user.get("date", "") or ""
+    SubElement(req, "questionAnswers").text = qa_json_str  # IMPORTANT: stringified JSON
 
     return tostring(req, encoding="unicode")
 
@@ -237,16 +239,14 @@ def _extract_response_id(create_json: Optional[Dict[str, Any]], headers: Dict[st
             "response_id", "ResponseId", "responseId",
             "id", "Id",
             "code", "Code",
-            "requestId", "request_id"  # allow, but treat as response_id
+            "requestId", "request_id"
         ]
         for k in id_keys:
             val = create_json.get(k)
             if val and str(val).strip():
                 return str(val).strip()
-
     loc = headers.get("Location") or headers.get("location")
     if loc and str(loc).strip():
-        # If backend returned a full URL, we don't parse here.
         return None
     return None
 
@@ -270,19 +270,20 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
         return {"backend_raw": resp.text, "polling_with": None}
 
     def _is_final(d: Dict[str, Any]) -> bool:
+        # Treat presence of 'data' or 'result' as final (your backend returns {"status":200,"data":...})
+        if "data" in d or "result" in d:
+            return True
         status = str(d.get("status") or d.get("Status") or "").lower()
         if status in ("done", "completed", "ok", "success", "ready", "finished"):
             return True
         if d.get("done") is True or d.get("ready") is True or d.get("is_ready") is True:
-            return True
-        if "result" in d or "data" in d:
             return True
         return False
 
     if _is_final(create_json):
         return {"backend_final": create_json, "polling_with": None}
 
-    # 2) Strictly use response_id for polling (Option 1)
+    # 2) Strictly use response_id for polling (if backend ever returns one)
     response_id = _extract_response_id(create_json, resp.headers)
     if not response_id:
         return {"backend_create": create_json, "polling_with": None}
@@ -411,6 +412,7 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
+    # Normalize-only mode (debugging)
     if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
         return jsonify({
             "status": "ok",
@@ -440,13 +442,13 @@ def adapter():
         "correlation_id": g.cid,
     }
 
-    # Make the response shape super clear for tools like Postman
+    # Make the response shape explicit for tools like Postman
     if isinstance(result_payload.get("backend"), dict):
         bt = result_payload["backend"]
         if isinstance(bt.get("fetch_target"), dict):
             bt["fetch_target"]["id_hint"] = "response_id"
         if "polling_with" in bt:
-            bt["polling_with"] = "response_id"
+            bt["polling_with"] = "response_id" if bt.get("polling_with") else None
 
     return jsonify(result_payload)
 
