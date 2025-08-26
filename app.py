@@ -3,6 +3,7 @@ import json
 import time
 import uuid
 import logging
+import re
 from typing import Dict, Any, List, Tuple, Optional
 
 from flask import Flask, request, jsonify, g
@@ -214,6 +215,123 @@ def _ensure_list_qas(raw_qas: Any) -> List[Any]:
                 pass
     return []
 
+# ==================== Free-form Normalizer ====================
+
+def _normalize_freeform(q_key: str, text: str) -> str:
+    """
+    Map free-form user sentences/phrases to canonical options.
+    Return canonical label if a rule hits; else return original text.
+    Extend as needed.
+    """
+    if not text:
+        return text
+
+    s = text.strip().lower()
+
+    def contains(*words):
+        return any(w in s for w in words)
+
+    # q1_purchasing_for
+    if q_key == "q1_purchasing_for":
+        if contains("myself", "for me", "for myself", "i am buying", "i’m buying", "im buying", "me only", "self"):
+            return "Self"
+        if contains("friend", "wife", "husband", "gf", "bf", "mother", "mom", "father", "dad", "sister", "brother", "partner", "fiancé", "fiance"):
+            return "Others"
+
+    # q2_gender
+    if q_key == "q2_gender":
+        if contains("female", "woman", "girl", "she", "her"):
+            return "Female"
+        if contains("male", "man", "boy", "he", "him"):
+            return "Male"
+
+    # q3_profession (keep freeform)
+    if q_key == "q3_profession":
+        return text
+
+    # q4_occasion
+    if q_key == "q4_occasion":
+        if contains("wedding", "marriage", "shaadi", "bride", "groom"):
+            return "Wedding"
+        if contains("engagement", "ring ceremony", "roka", "sagai"):
+            return "Engagement"
+        if contains("party", "birthday", "anniversary", "festival", "diwali", "eid", "christmas"):
+            return "Party"
+        if contains("daily", "office", "work", "every day", "everyday", "casual"):
+            return "Daily wear"
+
+    # q5_purpose
+    if q_key == "q5_purpose":
+        if contains("daily", "every day", "everyday", "routine", "office", "work"):
+            return "Daily wear"
+        if contains("gift"):
+            return "Gifting"
+        if contains("engagement"):
+            return "Engagement"
+        if contains("wedding", "marriage"):
+            return "Wedding"
+        if contains("party", "event", "occasion"):
+            return "Occasional wear"
+
+    # q6_day
+    if q_key == "q6_day":
+        if contains("busy", "hectic", "packed", "back to back", "lots of activities", "lot of activities"):
+            return "Busy With a lot of Activities"
+        if contains("relaxed", "calm", "laid back", "easy"):
+            return "Relaxed & Easy-going"
+
+    # q7_weekend
+    if q_key == "q7_weekend":
+        if contains("social", "friends", "outing", "go out", "party", "hangout", "hang out", "brunch", "movies", "shopping"):
+            return "Going out & socialising"
+        if contains("home", "stay in", "me-time", "me time", "alone", "read", "reading", "netflix", "rest"):
+            return "Staying in & relaxing"
+
+    # q8_work_dress
+    if q_key == "q8_work_dress":
+        if contains("designer", "chic", "stylish", "trendy", "fashion"):
+            return "Stylish & Chic: Designer Clothing"
+        if contains("formal", "business", "smart"):
+            return "Classic Formal"
+        if contains("casual", "comfortable", "comfy"):
+            return "Smart Casuals"
+
+    # q9_line
+    if q_key == "q9_line":
+        if contains("alone", "on my own", "by myself", "quiet", "independent"):
+            return "You prefer to be on your own"
+        if contains("chat", "talk", "friends", "social", "people"):
+            return "You like to chat with people around"
+
+    # q10_painting
+    if q_key == "q10_painting":
+        if contains("meaning", "story", "symbolism", "origin", "heritage"):
+            return "You value the meaning of the art & origin"
+        if contains("color", "colour", "colors", "colours", "vibrant", "aesthetic", "look"):
+            return "You value the colors & aesthetics"
+
+    # q11_emergency
+    if q_key == "q11_emergency":
+        if contains("arrange care", "care for my mother", "attend the meeting", "both", "manage both"):
+            return "You will arrange care for your mother & attend the meeting"
+        if contains("mother", "mom", "mum") and contains("stay", "skip", "miss"):
+            return "You will stay with your mother"
+        if contains("meeting") and contains("skip", "miss") and not contains("mother", "mom", "mum"):
+            return "You will attend the meeting"
+
+    # q12_drive (keep freeform)
+    if q_key == "q12_drive":
+        return text
+
+    # q13_last_minute_plans
+    if q_key == "q13_last_minute_plans":
+        if contains("dislike", "hate", "no last", "prefer planning", "plan ahead", "not a fan", "avoid"):
+            return "You dislike last-minute plans & prefer planning ahead"
+        if contains("spontaneous", "go with the flow", "last minute", "impulsive", "love surprises"):
+            return "You enjoy spontaneous last-minute plans"
+
+    return text
+
 # ==================== Validation (flexible / partial) ====================
 
 def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
@@ -244,31 +362,30 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         if not q_key and idx < len(mapping.must_have_keys):
             q_key = mapping.must_have_keys[idx]
 
-        # If still no key and unknowns are allowed, skip; otherwise keep but mark as unknown
         if not q_key:
             if mapping.allow_unknown:
                 continue
-            # treat as soft-unknown in partial mode: skip silently
             if ACCEPT_PARTIAL:
                 continue
-            # strict mode (rare): raise
             raise ValueError(json.dumps({"error": "Unknown question", "question_received": q_text_in or f'index_{idx}'}))
 
         meta = mapping.questions.get(q_key, {"canonical_label": q_key})
+
+        # FREE-FORM NORMALIZATION first, then mapping option normalization
+        freeform = _normalize_freeform(q_key, a_text_in)
         normalized.append({
             "key": q_key,
             "question_text": meta.get("canonical_label") or q_key,
-            "answer_text": mapping.normalize_answer(q_key, a_text_in),
+            "answer_text": mapping.normalize_answer(q_key, freeform),
         })
         seen.add(q_key)
 
-    # Compute missing but DO NOT fail if ACCEPT_PARTIAL
+    # Missing keys (non-blocking)
     missing = [k for k in mapping.must_have_keys if k not in seen]
     validation = {"missing_keys": missing}
     if missing and not ACCEPT_PARTIAL:
         raise ValueError(json.dumps({"error": "Mandatory questions missing", "missing_keys": missing}))
 
-    # preserve canonical order
     order = {k: i for i, k in enumerate(mapping.must_have_keys)}
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
 
@@ -465,7 +582,6 @@ def adapter():
     try:
         user, qas, validation = _validate(payload, MAPPING)
     except ValueError as ve:
-        # should only happen if ACCEPT_PARTIAL=false
         try:
             return jsonify({"status": "error", "error": json.loads(str(ve)), "correlation_id": g.cid}), 400
         except Exception:
@@ -498,12 +614,11 @@ def adapter():
         "request_id": user["request_id"],
         "result_key": user["result_key"],
         "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
-        "validation": validation,  # <— non-blocking list of missing keys
+        "validation": validation,
         "backend": backend_result,
         "correlation_id": g.cid,
     }
 
-    # cosmetics
     if isinstance(result_payload.get("backend"), dict):
         bt = result_payload["backend"]
         if isinstance(bt.get("fetch_target"), dict):
