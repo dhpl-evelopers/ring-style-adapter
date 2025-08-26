@@ -291,7 +291,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     for idx, item in enumerate(raw_qas):
         q_text_in, a_text_in = _extract_question_and_answer(item)
 
-        # Prefer label-based mapping; fallback to index order of must_have.
+        # Prefer label-based mapping; fallback to index into must_have
         q_key = mapping.resolve_q_key(q_text_in) if q_text_in else None
         if not q_key and idx < len(mapping.must_have_keys):
             q_key = mapping.must_have_keys[idx]
@@ -320,19 +320,32 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
     return user, normalized, validation
 
-# ==================== XML builder ====================
+# ==================== XML builder (unique key + placeholders) ====================
 
 def _gen_result_key(seed: Optional[str] = None) -> str:
-    base = seed or time.strftime("%Y%m%d-%H%M%S")
+    base = (seed or time.strftime("%Y%m%d-%H%M%S")).strip()
     return f"rk-{base}-{uuid.uuid4().hex[:6]}"
+
+def _nonempty(val: Optional[str], fallback: str) -> str:
+    v = (val or "").strip()
+    return v if v else fallback
 
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> Tuple[str, str]:
     """
-    Build XML expected by backend AND return the (possibly generated) result_key we used.
+    Build XML expected by backend AND return the (unique) result_key we used.
+
+    Backend reads:
+      <full_name>, <email>, <phone_number>, <result_key>, <date>, <questionAnswers>
     """
-    result_key = (user.get("result_key") or user.get("request_id") or "").strip()
-    if not result_key:
-        result_key = _gen_result_key()
+    incoming = (user.get("result_key") or user.get("request_id") or "").strip()
+    # ALWAYS make result_key unique (prevents DB duplicate on backend)
+    result_key = _gen_result_key(incoming)
+
+    # SAFE placeholders for possibly empty fields (avoid NOT NULL issues)
+    full_name    = _nonempty(user.get("full_name") or user.get("name"), "Unknown User")
+    email        = _nonempty(user.get("email"), "unknown@example.invalid")
+    phone_number = _nonempty(user.get("phone_number") or user.get("contact"), "N/A")
+    birth_date   = _nonempty(user.get("birth_date") or user.get("dob") or user.get("date"), "1970-01-01")
 
     qa_payload = [
         {"question": qa.get("question_text", "") or "",
@@ -342,11 +355,11 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> Tuple[str,
     qa_json_str = json.dumps(qa_payload, ensure_ascii=False)
 
     req = Element("Request")
-    SubElement(req, "full_name").text    = user.get("full_name", "") or user.get("name", "") or ""
-    SubElement(req, "email").text        = user.get("email", "") or ""
-    SubElement(req, "phone_number").text = user.get("phone_number", "") or user.get("contact", "") or ""
+    SubElement(req, "full_name").text    = full_name
+    SubElement(req, "email").text        = email
+    SubElement(req, "phone_number").text = phone_number
     SubElement(req, "result_key").text   = result_key
-    SubElement(req, "date").text         = user.get("birth_date", "") or user.get("dob", "") or user.get("date", "") or ""
+    SubElement(req, "date").text         = birth_date
     SubElement(req, "questionAnswers").text = qa_json_str
 
     return tostring(req, encoding="unicode"), result_key
@@ -383,10 +396,7 @@ def _extract_response_id(create_json: Optional[Dict[str, Any]], headers: Dict[st
             val = create_json.get(k)
             if val and str(val).strip():
                 return str(val).strip()
-    loc = headers.get("Location") or headers.get("location")
-    if loc and str(loc).strip():
-        # if your backend puts the id in a Location URL, parse here if needed
-        return None
+    # If your backend uses Location to convey ID, parse here
     return None
 
 def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
@@ -398,8 +408,10 @@ def _call_backend(xml_body: str, cid: str) -> Dict[str, Any]:
         logger.info("XML cid=%s payload=%s", cid, xml_body)
 
     resp = HTTP.post(create_url, data=xml_body.encode("utf-8"), headers=headers, timeout=BACKEND_TIMEOUT_S)
+
+    # Surface backend error body (do NOT 502 the caller on purpose)
     if resp.status_code >= 400:
-        raise RuntimeError(f"Backend createRequest failed: {resp.status_code} {resp.text}")
+        return {"backend_create": {"status_code": resp.status_code, "detail": resp.text, "headers": dict(resp.headers)}, "polling_with": None}
 
     try:
         create_json = resp.json()
@@ -540,20 +552,22 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
-    # Build XML (and ensure a result_key exists)
+    # Build XML (and ensure a result_key exists & is unique)
     xml_body, effective_result_key = _xml_superset(user, qas)
 
     # Debug-only: return normalized without calling backend
     if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
-        return jsonify({
+        out = {
             "status": "ok",
             "request_id": user.get("request_id", ""),
             "result_key": effective_result_key,
             "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
             "validation": validation,
             "correlation_id": g.cid,
-            "xml_echo": xml_body if LOG_XML_ALWAYS else None
-        })
+        }
+        if LOG_XML_ALWAYS:
+            out["xml"] = xml_body
+        return jsonify(out)
 
     try:
         backend_result = _call_backend(xml_body, g.cid)
