@@ -22,7 +22,6 @@ def _getenv(name: str, default: Optional[str] = None, required: bool = False) ->
 
 BACKEND_BASE_URL    = _getenv("BACKEND_BASE_URL", required=True).rstrip("/")
 CREATE_PATH         = _getenv("BACKEND_CREATE_PATH", "/createRequest")
-CREATE_JSON_PATH    = _getenv("BACKEND_CREATE_JSON_PATH", "/createRequestJSON")
 FETCH_PATH          = _getenv("BACKEND_FETCH_PATH", "/fetchResponse")
 BACKEND_TIMEOUT_S   = int(_getenv("BACKEND_TIMEOUT_SEC", "25"))
 MAPPING_PATH        = _getenv("MAPPING_PATH", "/home/site/wwwroot/mapping.config.json")
@@ -30,9 +29,9 @@ API_KEY_REQUIRED    = _getenv("API_KEY_REQUIRED", "false").lower() == "true"
 MAX_CONTENT_LENGTH  = int(_getenv("MAX_CONTENT_LENGTH", str(512 * 1024)))
 LOG_LEVEL           = _getenv("LOG_LEVEL", "INFO").upper()
 LOG_XML_ALWAYS      = _getenv("LOG_XML_ALWAYS", "false").lower() == "true"
-ACCEPT_PARTIAL      = _getenv("ACCEPT_PARTIAL", "true").lower() == "true"
-ALLOW_UNKNOWN       = _getenv("ALLOW_UNKNOWN", "true").lower() == "true"
-MOCK_BACKEND        = _getenv("MOCK_BACKEND", "false").lower() == "true"
+
+# —— Option-1: Only poll with response_id (never result_key/request_id)
+PREFER_RESULT_KEY_WHEN_NO_ID = False
 
 # ==================== App / Logging ====================
 
@@ -66,12 +65,11 @@ HTTP = _session()
 
 class Mapping:
     def __init__(self, raw: Dict[str, Any]) -> None:
-        self.allow_unknown = bool(raw.get("allow_unknown_questions", ALLOW_UNKNOWN))
+        self.allow_unknown = bool(raw.get("allow_unknown_questions", False))
         self.must_have_keys: List[str] = list(raw.get("must_have_questions_keys", []))
         self.questions: Dict[str, Dict[str, Any]] = dict(raw.get("questions", {}))
         self.label_to_key: Dict[str, str] = {}
         self.normalized_options: Dict[str, Dict[str, str]] = {}
-
         for q_key, meta in self.questions.items():
             labels = [meta.get("canonical_label", "")] + meta.get("labels", [])
             for lbl in labels:
@@ -79,7 +77,7 @@ class Mapping:
                     self.label_to_key[lbl.strip().lower()] = q_key
             opts = meta.get("options")
             if isinstance(opts, list):
-                norm: Dict[str, str] = {}
+                norm = {}
                 for o in opts:
                     if isinstance(o, str):
                         norm[o.strip().lower()] = o
@@ -92,10 +90,6 @@ class Mapping:
         if k in self.questions:
             return k
         return self.label_to_key.get(k.lower())
-
-    def canonical_label(self, q_key: str) -> str:
-        meta = self.questions.get(q_key, {})
-        return meta.get("canonical_label") or q_key
 
     def normalize_answer(self, q_key: str, answer: str) -> str:
         answer = (answer or "").strip()
@@ -120,7 +114,7 @@ def _load_mapping(path: str) -> Optional[Mapping]:
 
 MAPPING = _load_mapping(MAPPING_PATH)
 
-# ==================== Flex helpers ====================
+# ==================== Flex Q&A helpers ====================
 
 def _flex_str(x: Any) -> str:
     if x is None:
@@ -138,7 +132,89 @@ def _pick_first_truthy(*vals):
         return v
     return None
 
+def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Accept multiple UI shapes and return (question_text, answer_text).
+    """
+    if not isinstance(item, dict):
+        return "", ""
+
+    # QUESTION CANDIDATES
+    q = _pick_first_truthy(
+        item.get("question"),
+        item.get("q"),
+        item.get("label"),
+        item.get("title"),
+        item.get("text"),
+        item.get("id"),
+        item.get("key"),
+    )
+
+    # ANSWER CANDIDATES (flat)
+    a = _pick_first_truthy(
+        item.get("answer"),
+        item.get("value"),
+        item.get("option"),
+        item.get("selected"),
+        item.get("choice"),
+        item.get("val"),
+    )
+
+    # NESTED: selectedOption.value / selected_option.value / option.value
+    if a is None:
+        sel = _pick_first_truthy(
+            (item.get("selectedOption") or {}).get("value") if isinstance(item.get("selectedOption"), dict) else None,
+            (item.get("selected_option") or {}).get("value") if isinstance(item.get("selected_option"), dict) else None,
+            (item.get("option") or {}).get("value") if isinstance(item.get("option"), dict) else None,
+        )
+        if sel is not None:
+            a = sel
+
+    # LISTS: answers[], options[], choices[]
+    if a is None:
+        for key in ("answers", "options", "choices"):
+            arr = item.get(key)
+            if isinstance(arr, list) and arr:
+                picked: List[str] = []
+                for el in arr:
+                    if isinstance(el, dict):
+                        if el.get("selected") is True:
+                            picked.append(_flex_str(_pick_first_truthy(el.get("value"), el.get("label"), el.get("text"))))
+                    else:
+                        picked.append(_flex_str(el))
+                if not picked:
+                    for el in arr:
+                        if isinstance(el, dict):
+                            cand = _pick_first_truthy(el.get("value"), el.get("label"), el.get("text"))
+                            if cand:
+                                picked.append(_flex_str(cand))
+                                break
+                        else:
+                            if el:
+                                picked.append(_flex_str(el))
+                                break
+                if picked:
+                    a = ", ".join([p for p in picked if p != ""])
+                    break
+
+    q_text = _flex_str(q)
+    a_text = _flex_str(a)
+    return q_text, a_text
+
+# ==================== Helpers ====================
+
+def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
+    if not API_KEY_REQUIRED:
+        return None
+    key = headers.get("x-api-key") or headers.get("X-API-Key")
+    if not key:
+        return "Missing API key header 'x-api-key'."
+    return None
+
 def _ensure_list_qas(raw_qas: Any) -> List[Any]:
+    """
+    Accept list or stringified JSON or dict with 'qas'/'items' etc.
+    """
     if isinstance(raw_qas, list):
         return raw_qas
     if isinstance(raw_qas, dict):
@@ -157,117 +233,7 @@ def _ensure_list_qas(raw_qas: Any) -> List[Any]:
                 pass
     return []
 
-def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
-    if not isinstance(item, dict):
-        return "", ""
-    q = _pick_first_truthy(
-        item.get("question"), item.get("q"), item.get("label"), item.get("title"),
-        item.get("text"), item.get("id"), item.get("key")
-    )
-    a = _pick_first_truthy(
-        item.get("answer"), item.get("value"), item.get("option"),
-        item.get("selected"), item.get("choice"), item.get("val")
-    )
-    if a is None:
-        sel = _pick_first_truthy(
-            (item.get("selectedOption") or {}).get("value") if isinstance(item.get("selectedOption"), dict) else None,
-            (item.get("selected_option") or {}).get("value") if isinstance(item.get("selected_option"), dict) else None,
-            (item.get("option") or {}).get("value") if isinstance(item.get("option"), dict) else None,
-        )
-        if sel is not None:
-            a = sel
-    if a is None:
-        for key in ("answers", "options", "choices"):
-            arr = item.get(key)
-            if isinstance(arr, list) and arr:
-                picked: List[str] = []
-                for el in arr:
-                    if isinstance(el, dict) and el.get("selected") is True:
-                        picked.append(_flex_str(_pick_first_truthy(el.get("value"), el.get("label"), el.get("text"))))
-                    elif not isinstance(el, dict):
-                        picked.append(_flex_str(el))
-                if not picked:
-                    for el in arr:
-                        if isinstance(el, dict):
-                            cand = _pick_first_truthy(el.get("value"), el.get("label"), el.get("text"))
-                            if cand:
-                                picked.append(_flex_str(cand)); break
-                        elif el:
-                            picked.append(_flex_str(el)); break
-                if picked:
-                    a = ", ".join([p for p in picked if p != ""])
-                    break
-    return _flex_str(q), _flex_str(a)
-
-# ==================== Free-form normalization (lightweight) ====================
-
-def _normalize_freeform(q_key: str, text: str) -> str:
-    if not text:
-        return text
-    s = text.strip().lower()
-    def has(*words): return any(w in s for w in words)
-
-    if q_key == "q1_purchasing_for":
-        if has("myself", "for me", "self", "me only"): return "Self"
-        if has("wife", "husband", "mother", "father", "friend", "gf", "bf", "partner", "fiancé", "fiance"): return "Others"
-
-    if q_key == "q2_gender":
-        if has("female", "woman", "girl", "she", "her"): return "Female"
-        if has("male", "man", "boy", "he", "him"): return "Male"
-
-    if q_key == "q4_occasion":
-        if has("wedding", "marriage", "bride", "groom", "shaadi"): return "Wedding"
-        if has("engagement", "ring ceremony", "roka", "sagai"):   return "Engagement"
-        if has("daily", "office", "work", "casual"):               return "Daily wear"
-        if has("party", "birthday", "festival", "anniversary"):    return "Party"
-
-    if q_key == "q5_purpose":
-        if has("daily", "routine", "office", "work"):              return "Daily wear"
-        if has("gift"):                                            return "Gifting"
-        if has("wedding"):                                         return "Wedding"
-        if has("engagement"):                                      return "Engagement"
-        if has("party", "occasion", "event"):                      return "Occasional wear"
-
-    if q_key == "q6_day":
-        if has("busy", "hectic", "packed", "lot of activities"):  return "Busy With a lot of Activities"
-        if has("relaxed", "easy", "laid back"):                    return "Relaxed & Easy-going"
-
-    if q_key == "q7_weekend":
-        if has("social", "party", "go out", "friends", "outing"): return "Going out & socialising"
-        if has("home", "stay in", "me-time", "read", "netflix"):  return "Staying in & relaxing"
-
-    if q_key == "q8_work_dress":
-        if has("designer", "chic", "stylish", "fashion"):          return "Stylish & Chic: Designer Clothing"
-        if has("formal", "business", "smart"):                     return "Classic Formal"
-        if has("casual", "comfortable", "comfy"):                  return "Smart Casuals"
-
-    if q_key == "q9_line":
-        if has("alone", "by myself", "independent"):               return "You prefer to be on your own"
-        if has("chat", "talk", "friends", "social"):               return "You like to chat with people around"
-
-    if q_key == "q10_painting":
-        if has("meaning", "story", "symbol", "origin", "heritage"):return "You value the meaning of the art & origin"
-        if has("color", "colour", "vibrant", "aesthetic", "look"): return "You value the colors & aesthetics"
-
-    if q_key == "q11_emergency":
-        if has("arrange care", "care for my mother", "both"):      return "You will arrange care for your mother & attend the meeting"
-        if has("stay", "skip", "miss") and has("mother", "mom"):   return "You will stay with your mother"
-        if has("meeting") and has("attend"):                       return "You will attend the meeting"
-
-    # pass-through for free text questions
-    return text
-
-# ==================== Validation / Normalization pipeline ====================
-
-def _gen_result_key(seed: Optional[str] = None) -> str:
-    base = (seed or time.strftime("%Y%m%d-%H%M%S")).strip()
-    return f"rk-{base}-{uuid.uuid4().hex[:6]}"
-
-def _ensure_result_key(user: Dict[str, Any]) -> str:
-    incoming = (user.get("result_key") or user.get("request_id") or "").strip()
-    return incoming or _gen_result_key()
-
-def _validate_and_normalize(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
+def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     user = {
         "full_name":    payload.get("full_name") or payload.get("name") or "",
         "email":        payload.get("email") or "",
@@ -280,85 +246,81 @@ def _validate_and_normalize(payload: Dict[str, Any], mapping: Mapping) -> Tuple[
 
     raw_qas_input = payload.get("questionAnswers") or payload.get("question_answers") or []
     raw_qas = _ensure_list_qas(raw_qas_input)
+
     if not isinstance(raw_qas, list):
         raise ValueError(json.dumps({"error": "questionAnswers must be a list or JSON string"}))
 
     normalized: List[Dict[str, Any]] = []
     seen = set()
 
-    for idx, item in enumerate(raw_qas):
+    for item in raw_qas:
+        # Flexible extraction
         q_text_in, a_text_in = _extract_question_and_answer(item)
-        q_key = mapping.resolve_q_key(q_text_in) if q_text_in else None
-        if not q_key and idx < len(mapping.must_have_keys):
-            q_key = mapping.must_have_keys[idx]  # positional fallback
+        if not q_text_in:
+            # fallback to legacy fields if extractor couldn't find a label
+            q_text_in = _flex_str((isinstance(item, dict) and (item.get("question") or item.get("id") or item.get("key"))) or "")
 
+        q_key = mapping.resolve_q_key(q_text_in)
         if not q_key:
-            if mapping.allow_unknown or ACCEPT_PARTIAL:
+            if mapping.allow_unknown:
                 continue
-            raise ValueError(json.dumps({"error": "Unknown question", "question_received": q_text_in or f'index_{idx}'}))
+            raise ValueError(json.dumps({"error": "Unknown question", "question_received": q_text_in}))
 
-        meta_label = mapping.canonical_label(q_key)
-        freeform = _normalize_freeform(q_key, a_text_in)
+        meta = mapping.questions[q_key]
         normalized.append({
             "key": q_key,
-            "question_text": meta_label,
-            "answer_text": mapping.normalize_answer(q_key, freeform),
+            "question_text": meta.get("canonical_label") or q_key,
+            "answer_text": mapping.normalize_answer(q_key, a_text_in),
         })
         seen.add(q_key)
 
+    # Conditional required question example
+    purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
+    if purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
+        raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
+
     missing = [k for k in mapping.must_have_keys if k not in seen]
-    validation = {"missing_keys": missing}
-    if missing and not ACCEPT_PARTIAL:
+    if missing:
         raise ValueError(json.dumps({"error": "Mandatory questions missing", "missing_keys": missing}))
 
     order = {k: i for i, k in enumerate(mapping.must_have_keys)}
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
-    return user, normalized, validation
+    return user, normalized
 
-# ==================== Backend formats (XML / JSON) ====================
-
-def _to_backend_json(result_key: str, user: Dict[str, Any], qas: List[Dict[str, Any]]) -> Dict[str, Any]:
-    questions = [qa.get("question_text", "") or "" for qa in qas]
-    answers   = [qa.get("answer_text", "")   or "" for qa in qas]
-    return {
-        "request_id":   result_key,
-        "email":        (user.get("email") or "unknown@example.invalid"),
-        "name":         (user.get("full_name") or user.get("name") or "Unknown User"),
-        "phone_number": (user.get("phone_number") or user.get("contact") or "N/A"),
-        "birth_date":   (user.get("birth_date") or user.get("dob") or user.get("date") or "1970-01-01"),
-        "questions":    questions,
-        "answers":      answers,
-    }
-
-def _to_backend_xml(result_key: str, user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
-    full_name    = (user.get("full_name") or user.get("name") or "Unknown User").strip()
-    email        = (user.get("email") or "unknown@example.invalid").strip()
-    phone_number = (user.get("phone_number") or user.get("contact") or "N/A").strip()
-    birth_date   = (user.get("birth_date") or user.get("dob") or user.get("date") or "1970-01-01").strip()
+# ---------- XML builder (matches backend expectations) ----------
+def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
+    """
+    Backend expects:
+      <full_name>, <email>, <phone_number>, <result_key>, <date>,
+      <questionAnswers>  // stringified JSON: [{question, selectedOption:{value}}]
+    """
+    result_key = (user.get("result_key") or user.get("request_id") or str(uuid.uuid4())).strip()
 
     qa_payload = [
-        {"question": qa.get("question_text", "") or "",
-         "selectedOption": {"value": qa.get("answer_text", "") or ""}}
+        {
+            "question": qa.get("question_text", "") or "",
+            "selectedOption": {"value": qa.get("answer_text", "") or ""}
+        }
         for qa in qas
     ]
     qa_json_str = json.dumps(qa_payload, ensure_ascii=False)
 
     req = Element("Request")
-    SubElement(req, "full_name").text    = full_name
-    SubElement(req, "email").text        = email
-    SubElement(req, "phone_number").text = phone_number
+    SubElement(req, "full_name").text    = user.get("full_name", "") or user.get("name", "") or ""
+    SubElement(req, "email").text        = user.get("email", "") or ""
+    SubElement(req, "phone_number").text = user.get("phone_number", "") or user.get("contact", "") or ""
     SubElement(req, "result_key").text   = result_key
-    SubElement(req, "date").text         = birth_date
+    SubElement(req, "date").text         = user.get("birth_date", "") or user.get("dob", "") or user.get("date", "") or ""
     SubElement(req, "questionAnswers").text = qa_json_str
-    return tostring(req, encoding="unicode")
 
-# ==================== Backend calls (XML → JSON fallback) ====================
+    return tostring(req, encoding="unicode")
 
 def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]]) -> float:
     ra = resp.headers.get("Retry-After")
     if ra:
         try:
-            sec = int(ra.strip()); return max(0.2, min(sec, 5.0))
+            sec = int(ra.strip())
+            return max(0.2, min(sec, 5.0))
         except Exception:
             pass
     if body_json:
@@ -371,108 +333,130 @@ def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]
         for key in ("pollInMs", "poll_in_ms"):
             if key in body_json:
                 try:
-                    ms = float(body_json[key]); return max(0.2, min(ms/1000.0, 5.0))
+                    ms = float(body_json[key])
+                    return max(0.2, min(ms / 1000.0, 5.0))
                 except Exception:
                     pass
     return 0.7
 
-def _extract_response_id(create_json: Optional[Dict[str, Any]]) -> Optional[str]:
+def _extract_response_id(create_json: Optional[Dict[str, Any]], headers: Dict[str, Any]) -> Optional[str]:
     if create_json:
-        for k in ("response_id","ResponseId","responseId","id","Id","code","Code","requestId","request_id"):
+        id_keys = [
+            "response_id", "ResponseId", "responseId",
+            "id", "Id",
+            "code", "Code",
+            "requestId", "request_id",
+        ]
+        for k in id_keys:
             val = create_json.get(k)
             if val and str(val).strip():
                 return str(val).strip()
-    return None
-
-def _post_xml_then_json_fallback(backend_xml: str, backend_json: Dict[str, Any]) -> Dict[str, Any]:
-    # XML first
-    try:
-        r1 = HTTP.post(f"{BACKEND_BASE_URL}{CREATE_PATH}", data=backend_xml.encode("utf-8"),
-                       headers={"Content-Type": "application/xml", "Accept": "application/json, */*"},
-                       timeout=BACKEND_TIMEOUT_S)
-    except Exception as e:
-        xml_attempt = {"transport_error": str(e)}
-        r1 = None
-    else:
-        xml_attempt = {"status_code": r1.status_code, "detail": r1.text[:500]}
-        if r1.status_code < 400:
-            try:
-                body = r1.json()
-            except Exception:
-                return {"backend_raw": r1.text, "path": "xml_first_try"}
-            if ("data" in body) or (str(body.get("status", "")).lower() in ("ok","success","done","completed","ready")):
-                return {"backend_final": body, "path": "xml_first_try"}
-            rid = _extract_response_id(body)
-            if not rid:
-                return {"backend_create": body, "path": "xml_first_try"}
-            deadline = time.time() + BACKEND_TIMEOUT_S
-            while time.time() < deadline:
-                rp = HTTP.get(f"{BACKEND_BASE_URL}{FETCH_PATH}", params={"response_id": rid},
-                              headers={"Accept": "application/json, */*"}, timeout=BACKEND_TIMEOUT_S)
-                if rp.status_code == 202:
-                    time.sleep(_get_retry_after(rp, None)); continue
-                if rp.status_code >= 400:
-                    time.sleep(0.7); continue
-                try:
-                    pdata = rp.json()
-                except Exception:
-                    return {"backend_raw": rp.text, "path": "xml_first_try"}
-                st = str(pdata.get("status") or "").lower()
-                if ("data" in pdata) or (st in ("ok","success","done","completed","ready")):
-                    return {"backend_final": pdata, "path": "xml_first_try"}
-                time.sleep(_get_retry_after(rp, pdata))
-
-    # JSON fallback
-    try:
-        r2 = HTTP.post(f"{BACKEND_BASE_URL}{CREATE_JSON_PATH}", json=backend_json,
-                       headers={"Content-Type": "application/json", "Accept": "application/json, */*"},
-                       timeout=BACKEND_TIMEOUT_S)
-    except Exception as e:
-        return {"xml_first_try": xml_attempt, "json_fallback": {"transport_error": str(e), "body_sent": backend_json}, "path": "json_fallback"}
-
-    if r2.status_code >= 400:
-        return {"xml_first_try": xml_attempt, "json_fallback": {"status_code": r2.status_code, "detail": r2.text, "body_sent": backend_json}, "path": "json_fallback"}
-
-    try:
-        body2 = r2.json()
-    except Exception:
-        return {"backend_raw": r2.text, "path": "json_fallback"}
-
-    if ("data" in body2) or (str(body2.get("status","")).lower() in ("ok","success","done","completed","ready")):
-        return {"backend_final": body2, "path": "json_fallback"}
-
-    rid2 = _extract_response_id(body2)
-    if not rid2:
-        return {"backend_create": body2, "path": "json_fallback"}
-
-    deadline = time.time() + BACKEND_TIMEOUT_S
-    while time.time() < deadline:
-        rp2 = HTTP.get(f"{BACKEND_BASE_URL}{FETCH_PATH}", params={"response_id": rid2},
-                       headers={"Accept": "application/json, */*"}, timeout=BACKEND_TIMEOUT_S)
-        if rp2.status_code == 202:
-            time.sleep(_get_retry_after(rp2, None)); continue
-        if rp2.status_code >= 400:
-            time.sleep(0.7); continue
-        try:
-            pdata2 = rp2.json()
-        except Exception:
-            return {"backend_raw": rp2.text, "path": "json_fallback"}
-        st2 = str(pdata2.get("status") or "").lower()
-        if ("data" in pdata2) or (st2 in ("ok","success","done","completed","ready")):
-            return {"backend_final": pdata2, "path": "json_fallback"}
-        time.sleep(_get_retry_after(rp2, pdata2))
-
-    return {"backend_fetch_timeout": True, "path": "json_fallback"}
-
-# ==================== Misc helpers ====================
-
-def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
-    if not API_KEY_REQUIRED:
+    loc = headers.get("Location") or headers.get("location")
+    if loc and str(loc).strip():
         return None
-    key = headers.get("x-api-key") or headers.get("X-API-Key")
-    if not key:
-        return "Missing API key header 'x-api-key'."
     return None
+
+def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, Any]:
+    create_url = f"{BACKEND_BASE_URL}{CREATE_PATH}"
+    headers = {"Content-Type": "application/xml", "Accept": "application/json, */*"}
+
+    logger.info("POST %s cid=%s", create_url, cid)
+    if LOG_XML_ALWAYS:
+        logger.info("XML cid=%s payload=%s", cid, xml_body)
+
+    # CREATE
+    resp = HTTP.post(create_url, data=xml_body.encode("utf-8"), headers=headers, timeout=BACKEND_TIMEOUT_S)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Backend createRequest failed: {resp.status_code} {resp.text}")
+
+    create_json: Optional[Dict[str, Any]] = None
+    try:
+        create_json = resp.json()
+    except Exception:
+        return {"backend_raw": resp.text, "polling_with": None}
+
+    def _is_final(d: Dict[str, Any]) -> bool:
+        if "data" in d or "result" in d:
+            return True
+        status = str(d.get("status") or d.get("Status") or "").lower()
+        if status in ("done", "completed", "ok", "success", "ready", "finished"):
+            return True
+        if d.get("done") is True or d.get("ready") is True or d.get("is_ready") is True:
+            return True
+        return False
+
+    if _is_final(create_json):
+        return {"backend_final": create_json, "polling_with": None}
+
+    # Poll only if a response_id is explicitly returned
+    response_id = _extract_response_id(create_json, resp.headers)
+    if not response_id:
+        return {"backend_create": create_json, "polling_with": None}
+
+    fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
+    deadline = time.time() + BACKEND_TIMEOUT_S
+    last: Any = None
+
+    while time.time() < deadline:
+        try:
+            r = HTTP.get(
+                fetch_url,
+                params={"response_id": response_id},
+                headers={"Accept": "application/json, */*"},
+                timeout=BACKEND_TIMEOUT_S
+            )
+
+            if r.status_code == 202:
+                time.sleep(_get_retry_after(r, None))
+                continue
+
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            if r.status_code == 200 and "application/json" not in ctype:
+                body_text = r.text.strip() if isinstance(r.text, str) else ""
+                if not body_text or "list index out of range" in body_text.lower():
+                    time.sleep(0.7)
+                    continue
+                return {
+                    "backend_raw": body_text,
+                    "polling_with": "response_id",
+                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
+                }
+
+            if r.status_code >= 400:
+                last = {"status_code": r.status_code, "body": r.text, "params_tried": {"response_id": response_id}}
+                time.sleep(0.7)
+                continue
+
+            try:
+                data = r.json()
+            except Exception:
+                return {
+                    "backend_raw": r.text,
+                    "polling_with": "response_id",
+                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
+                }
+
+            last = data
+            status = str(data.get("status") or data.get("Status") or "").lower()
+            if status in ("done", "completed", "ok", "success", "ready", "finished") or data.get("done") is True:
+                return {
+                    "backend_final": data,
+                    "polling_with": "response_id",
+                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
+                }
+
+            time.sleep(_get_retry_after(r, data))
+
+        except Exception as e:
+            last = {"exception": str(e)}
+            time.sleep(0.7)
+
+    return {
+        "backend_fetch_timeout": True,
+        "last": last,
+        "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
+        "polling_with": "response_id"
+    }
 
 def _json_error(status: int, code: str, message: str, details: Optional[Dict[str, Any]] = None):
     payload = {"status": "error", "error": {"code": code, "message": message}, "correlation_id": g.get("cid")}
@@ -485,7 +469,7 @@ def _json_error(status: int, code: str, message: str, details: Optional[Dict[str
 @app.before_request
 def _before():
     g.cid = request.headers.get("x-request-id") or str(uuid.uuid4())
-    if request.endpoint in ("adapter", "transform"):
+    if request.endpoint == "adapter":
         ctype = (request.content_type or "").lower()
         if "application/json" not in ctype:
             return _json_error(415, "unsupported_media_type", "Content-Type must be application/json")
@@ -501,7 +485,7 @@ def _after(resp):
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "service": "adapter", "backend": BACKEND_BASE_URL, "mock_backend": MOCK_BACKEND})
+    return jsonify({"status": "ok", "service": "adapter", "backend": BACKEND_BASE_URL})
 
 @app.get("/ready")
 def ready():
@@ -509,46 +493,6 @@ def ready():
         return _json_error(503, "not_ready", "Mapping not loaded")
     return jsonify({"status": "ok"})
 
-# ---------- Transform-only endpoint ----------
-@app.post("/adapter/transform")
-def transform():
-    if API_KEY_REQUIRED:
-        err = _require_api_key(request.headers)
-        if err:
-            return _json_error(401, "unauthorized", err)
-    if MAPPING is None:
-        return _json_error(503, "not_ready", "Mapping not loaded")
-
-    try:
-        payload = request.get_json(force=True, silent=False)
-        if not isinstance(payload, dict):
-            return _json_error(400, "bad_request", "Body must be a JSON object")
-    except Exception as e:
-        return _json_error(400, "bad_json", f"Invalid JSON: {e}")
-
-    try:
-        user, qas, validation = _validate_and_normalize(payload, MAPPING)
-    except ValueError as ve:
-        try:
-            return jsonify({"status": "error", "error": json.loads(str(ve)), "correlation_id": g.cid}), 400
-        except Exception:
-            return _json_error(400, "validation_error", str(ve))
-
-    result_key = _ensure_result_key(user)
-    backend_json = _to_backend_json(result_key, user, qas)
-    backend_xml  = _to_backend_xml(result_key, user, qas)
-
-    return jsonify({
-        "status": "ok",
-        "result_key": result_key,
-        "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
-        "validation": validation,
-        "backend_json": backend_json,
-        "backend_xml": backend_xml,
-        "correlation_id": g.cid,
-    })
-
-# ---------- Main adapter (backend call, mock toggle, transform_only flag) ----------
 @app.post("/adapter")
 def adapter():
     if API_KEY_REQUIRED:
@@ -565,95 +509,54 @@ def adapter():
     except Exception as e:
         return _json_error(400, "bad_json", f"Invalid JSON: {e}")
 
-    # Normalize-only exit
-    if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
-        try:
-            user, qas, validation = _validate_and_normalize(payload, MAPPING)
-        except ValueError as ve:
-            try:
-                return jsonify({"status": "error", "error": json.loads(str(ve)), "correlation_id": g.cid}), 400
-            except Exception:
-                return _json_error(400, "validation_error", str(ve))
-        rk = _ensure_result_key(user)
-        return jsonify({
-            "status": "ok",
-            "request_id": user.get("request_id", ""),
-            "result_key": rk,
-            "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
-            "validation": {"missing_keys": validation["missing_keys"]},
-            "correlation_id": g.cid,
-        })
-
-    # Full flow
     try:
-        user, qas, validation = _validate_and_normalize(payload, MAPPING)
+        user, qas = _validate(payload, MAPPING)
     except ValueError as ve:
         try:
             return jsonify({"status": "error", "error": json.loads(str(ve)), "correlation_id": g.cid}), 400
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
-    result_key = _ensure_result_key(user)
-    backend_json = _to_backend_json(result_key, user, qas)
-    backend_xml  = _to_backend_xml(result_key, user, qas)
-
-    # Only transform
-    if str(request.args.get("transform_only", "")).lower() in ("1", "true", "yes"):
+    # Debug-only: return normalized without calling backend
+    if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
         return jsonify({
             "status": "ok",
-            "result_key": result_key,
+            "request_id": user["request_id"],
+            "result_key": user["result_key"],
             "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
-            "validation": validation,
-            "backend_json": backend_json,
-            "backend_xml": backend_xml,
             "correlation_id": g.cid,
         })
 
-    # Mock backend path (bypass real backend/DB)
-    if MOCK_BACKEND:
-        return jsonify({
-            "status": "ok",
-            "request_id": user.get("request_id", ""),
-            "result_key": result_key,
-            "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
-            "validation": validation,
-            "backend": {
-                "backend_final": {
-                    "status": 200,
-                    "data": {
-                        "mock": True,
-                        "message": "MOCK_BACKEND enabled; DB bypassed",
-                        "received_formats": ["xml", "json"],
-                    }
-                },
-                "path": "mock"
-            },
-            "correlation_id": g.cid,
-        })
+    xml_body = _xml_superset(user, qas)
+    if LOG_XML_ALWAYS:
+        logger.info("Built XML cid=%s: %s", g.cid, xml_body)
 
-    # Real backend call (XML first, JSON fallback)
     try:
-        backend_result = _post_xml_then_json_fallback(backend_xml, backend_json)
+        backend_result = _call_backend(xml_body, g.cid, user)
     except Exception as e:
         logger.exception("Backend call failed cid=%s", g.cid)
-        body = {"details": str(e)}
-        if LOG_XML_ALWAYS:
-            body["xml"]  = backend_xml
-            body["json"] = backend_json
+        body = {"details": str(e), "xml": xml_body} if LOG_XML_ALWAYS else {"details": str(e)}
         return _json_error(502, "backend_error", "Upstream backend call failed", body)
 
-    return jsonify({
+    result_payload = {
         "status": "ok",
-        "request_id": user.get("request_id", ""),
-        "result_key": result_key,
+        "request_id": user["request_id"],
+        "result_key": user["result_key"],  # echo only
         "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
-        "validation": validation,
         "backend": backend_result,
         "correlation_id": g.cid,
-    })
+    }
+
+    if isinstance(result_payload.get("backend"), dict):
+        bt = result_payload["backend"]
+        if isinstance(bt.get("fetch_target"), dict):
+            bt["fetch_target"]["id_hint"] = "response_id"
+        if "polling_with" in bt:
+            bt["polling_with"] = "response_id" if bt.get("polling_with") else None
+
+    return jsonify(result_payload)
 
 # ==================== Main ====================
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
-
