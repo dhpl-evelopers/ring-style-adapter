@@ -253,20 +253,22 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     normalized: List[Dict[str, Any]] = []
     seen = set()
 
-    for item in raw_qas:
-        # Flexible extraction
+    for idx, item in enumerate(raw_qas):
         q_text_in, a_text_in = _extract_question_and_answer(item)
-        if not q_text_in:
-            # fallback to legacy fields if extractor couldn't find a label
-            q_text_in = _flex_str((isinstance(item, dict) and (item.get("question") or item.get("id") or item.get("key"))) or "")
 
-        q_key = mapping.resolve_q_key(q_text_in)
+        # If no label provided, map by position
+        q_key = None
+        if q_text_in:
+            q_key = mapping.resolve_q_key(q_text_in)
+        if not q_key and idx < len(mapping.must_have_keys):
+            q_key = mapping.must_have_keys[idx]
+
         if not q_key:
             if mapping.allow_unknown:
                 continue
-            raise ValueError(json.dumps({"error": "Unknown question", "question_received": q_text_in}))
+            raise ValueError(json.dumps({"error": "Unknown question", "question_received": q_text_in or f'index_{idx}'}))
 
-        meta = mapping.questions[q_key]
+        meta = mapping.questions.get(q_key, {"canonical_label": q_key})
         normalized.append({
             "key": q_key,
             "question_text": meta.get("canonical_label") or q_key,
@@ -274,18 +276,16 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         })
         seen.add(q_key)
 
-    # Conditional required question example
-    purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
-    if purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
-        raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
-
+    # enforce mandatory
     missing = [k for k in mapping.must_have_keys if k not in seen]
     if missing:
         raise ValueError(json.dumps({"error": "Mandatory questions missing", "missing_keys": missing}))
 
     order = {k: i for i, k in enumerate(mapping.must_have_keys)}
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
+
     return user, normalized
+
 
 # ---------- XML builder (matches backend expectations) ----------
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
