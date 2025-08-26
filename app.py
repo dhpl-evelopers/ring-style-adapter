@@ -31,9 +31,8 @@ MAX_CONTENT_LENGTH  = int(_getenv("MAX_CONTENT_LENGTH", str(512 * 1024)))
 LOG_LEVEL           = _getenv("LOG_LEVEL", "INFO").upper()
 LOG_XML_ALWAYS      = _getenv("LOG_XML_ALWAYS", "false").lower() == "true"
 
-# If true, when create doesn't give us a concrete response_id or link,
-# we will poll using result_key (your "res_123456") first.
-PREFER_RESULT_KEY_WHEN_NO_ID = _getenv("PREFER_RESULT_KEY_WHEN_NO_ID", "true").lower() == "true"
+# —— Option-1 hard standardization: never poll with result_key/request_id
+PREFER_RESULT_KEY_WHEN_NO_ID = False  # force response_id only
 
 # ==================== App / Logging ====================
 
@@ -244,52 +243,30 @@ def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]
                     pass
     return 0.7
 
-def _build_fetch_target(create_json: Optional[Dict[str, Any]],
-                        headers: Dict[str, Any],
-                        user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _extract_response_id(create_json: Optional[Dict[str, Any]], headers: Dict[str, Any]) -> Optional[str]:
     """
-    Figure out how to poll:
-    1) explicit id/code from create response
-    2) explicit link
-    3) HAL links
-    4) Location header
-    5) Fallback to result_key (if configured)
+    Normalize any 'id-like' field into response_id.
+    We DO NOT accept result_key here (Option 1).
     """
     if create_json:
-        id_keys = ["response_id", "ResponseId", "responseId", "id", "Id", "code", "Code", "requestCode", "RequestCode", "requestId", "request_id"]
+        id_keys = [
+            "response_id", "ResponseId", "responseId",
+            "id", "Id",
+            "code", "Code",
+            "requestId", "request_id"  # allow, but treat as response_id
+        ]
         for k in id_keys:
-            if k in create_json and str(create_json[k]).strip():
-                return {"mode": "id", "id": str(create_json[k]).strip(), "id_hint": k}
+            val = create_json.get(k)
+            if val and str(val).strip():
+                return str(val).strip()
 
-        link_keys = ["fetch_url", "fetchUrl", "url", "URL", "link", "Link", "result_url", "resultUrl"]
-        for k in link_keys:
-            if k in create_json and str(create_json[k]).strip():
-                url = str(create_json[k]).strip()
-                if url.startswith("/"):
-                    url = urljoin(BACKEND_BASE_URL + "/", url.lstrip("/"))
-                return {"mode": "link", "url": url}
+        # HAL / links that encode the id in a templated URL are uncommon; skip.
 
-        links = create_json.get("_links") or create_json.get("links")
-        if isinstance(links, dict):
-            for cand in ("result", "self", "poll", "status"):
-                node = links.get(cand)
-                if isinstance(node, dict) and node.get("href"):
-                    url = str(node["href"]).strip()
-                    if url.startswith("/"):
-                        url = urljoin(BACKEND_BASE_URL + "/", url.lstrip("/"))
-                    return {"mode": "link", "url": url}
-
+    # Location header with direct URL (rare for your flow) — attempt to parse query ?response_id=...
     loc = headers.get("Location") or headers.get("location")
     if loc and str(loc).strip():
-        url = str(loc).strip()
-        if url.startswith("/"):
-            url = urljoin(BACKEND_BASE_URL + "/", url.lstrip("/"))
-        return {"mode": "link", "url": url}
-
-    # Fallback: use result_key to poll if allowed
-    rk = (user or {}).get("result_key") or ""
-    if PREFER_RESULT_KEY_WHEN_NO_ID and rk.strip():
-        return {"mode": "id", "id": rk.strip(), "id_hint": "result_key"}
+        # If the backend returned a full fetch URL, we won't parse — caller will poll by link (not used here).
+        return None
 
     return None
 
@@ -326,123 +303,76 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
     if _is_final(create_json):
         return {"backend_final": create_json, "polling_with": None}
 
-    # 2) Decide how to poll
-    fetch_target = _build_fetch_target(create_json, resp.headers, user)
-    if not fetch_target:
-        # No id/link; return create body for the caller to inspect
+    # 2) Strictly pick a response_id to poll with (Option 1)
+    response_id = _extract_response_id(create_json, resp.headers)
+    if not response_id:
+        # No usable ID => return create body so caller can inspect; do NOT poll with result_key
         return {"backend_create": create_json, "polling_with": None}
 
+    fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
     deadline = time.time() + BACKEND_TIMEOUT_S
     last: Any = None
 
     while time.time() < deadline:
         try:
-            if fetch_target["mode"] == "id":
-                fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
-                rid = fetch_target["id"]
-                hint = fetch_target.get("id_hint") or ""
+            r = HTTP.get(
+                fetch_url,
+                params={"response_id": response_id},
+                headers={"Accept": "application/json, */*"},
+                timeout=BACKEND_TIMEOUT_S
+            )
 
-                # Order matters: prefer the param that matches our hint.
-                by_resultkey = [
-                    {"result_key": rid},
-                    {"resultKey": rid},
-                    {"response_id": rid},
-                    {"responseId": rid},
-                    {"id": rid},
-                    {"code": rid},
-                    {"requestId": rid},
-                    {"request_id": rid},
-                ]
-                by_responseid = [
-                    {"response_id": rid},
-                    {"responseId": rid},
-                    {"id": rid},
-                    {"code": rid},
-                    {"requestId": rid},
-                    {"request_id": rid},
-                    {"result_key": rid},
-                    {"resultKey": rid},
-                ]
-                param_variants = by_resultkey if "result" in hint.lower() else by_responseid
+            if r.status_code == 202:
+                time.sleep(_get_retry_after(r, None))
+                continue
 
-                for params in param_variants:
-                    r = HTTP.get(fetch_url, params=params, headers={"Accept": "application/json, */*"}, timeout=BACKEND_TIMEOUT_S)
-
-                    # 202 => definitely not ready
-                    if r.status_code == 202:
-                        time.sleep(_get_retry_after(r, None))
-                        continue
-
-                    # Some backends return 200 with a *text* placeholder like "list index out of range".
-                    ctype = (r.headers.get("Content-Type") or "").lower()
-                    if r.status_code == 200 and "application/json" not in ctype:
-                        body_text = r.text.strip() if isinstance(r.text, str) else ""
-                        if not body_text or "list index out of range" in body_text.lower():
-                            # Treat as "still computing"
-                            time.sleep(0.7)
-                            continue
-                        # Otherwise, accept as final raw
-                        return {"backend_raw": body_text, "polling_with": hint or "id"}
-
-                    if r.status_code >= 400:
-                        last = {"status_code": r.status_code, "body": r.text, "params_tried": params}
-                        # 4xx from some variants, try the next variant before backing off
-                        continue
-
-                    # Try to parse JSON
-                    try:
-                        data = r.json()
-                    except Exception:
-                        # Non-JSON 200 where we couldn't parse => final raw
-                        return {"backend_raw": r.text, "polling_with": hint or "id"}
-
-                    last = data
-                    # Final?
-                    status = str(data.get("status") or data.get("Status") or "").lower()
-                    if status in ("done", "completed", "ok", "success", "ready", "finished") or data.get("done") is True:
-                        return {"backend_final": data, "polling_with": hint or "id"}
-
-                # No variant succeeded in this loop; small pause
-                time.sleep(0.7)
-
-            else:
-                # Direct polling link
-                link = fetch_target["url"]
-                r = HTTP.get(link, headers={"Accept": "application/json, */*"}, timeout=BACKEND_TIMEOUT_S)
-                if r.status_code == 202:
-                    time.sleep(_get_retry_after(r, None))
-                    continue
-
-                ctype = (r.headers.get("Content-Type") or "").lower()
-                if r.status_code == 200 and "application/json" not in ctype:
-                    body_text = r.text.strip() if isinstance(r.text, str) else ""
-                    if not body_text or "list index out of range" in body_text.lower():
-                        time.sleep(0.7)
-                        continue
-                    return {"backend_raw": body_text, "polling_with": "link"}
-
-                if r.status_code >= 400:
-                    last = {"status_code": r.status_code, "body": r.text}
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            if r.status_code == 200 and "application/json" not in ctype:
+                body_text = r.text.strip() if isinstance(r.text, str) else ""
+                if not body_text or "list index out of range" in body_text.lower():
                     time.sleep(0.7)
                     continue
+                return {
+                    "backend_raw": body_text,
+                    "polling_with": "response_id",
+                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
+                }
 
-                try:
-                    data = r.json()
-                except Exception:
-                    return {"backend_raw": r.text, "polling_with": "link"}
+            if r.status_code >= 400:
+                last = {"status_code": r.status_code, "body": r.text, "params_tried": {"response_id": response_id}}
+                time.sleep(0.7)
+                continue
 
-                last = data
-                status = str(data.get("status") or data.get("Status") or "").lower()
-                if status in ("done", "completed", "ok", "success", "ready", "finished") or data.get("done") is True:
-                    return {"backend_final": data, "polling_with": "link"}
+            try:
+                data = r.json()
+            except Exception:
+                return {
+                    "backend_raw": r.text,
+                    "polling_with": "response_id",
+                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
+                }
 
-                time.sleep(_get_retry_after(r, last))
+            last = data
+            status = str(data.get("status") or data.get("Status") or "").lower()
+            if status in ("done", "completed", "ok", "success", "ready", "finished") or data.get("done") is True:
+                return {
+                    "backend_final": data,
+                    "polling_with": "response_id",
+                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
+                }
+
+            time.sleep(_get_retry_after(r, data))
 
         except Exception as e:
             last = {"exception": str(e)}
             time.sleep(0.7)
 
-    return {"backend_fetch_timeout": True, "last": last, "fetch_target": fetch_target, "polling_with": fetch_target.get("id_hint") if isinstance(fetch_target, dict) else None}
+    return {
+        "backend_fetch_timeout": True,
+        "last": last,
+        "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
+        "polling_with": "response_id"
+    }
 
 def _json_error(status: int, code: str, message: str, details: Optional[Dict[str, Any]] = None):
     payload = {"status": "error", "error": {"code": code, "message": message}, "correlation_id": g.get("cid")}
@@ -471,7 +401,7 @@ def _after(resp):
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "service": "adapter"})
+    return jsonify({"status": "ok", "service": "adapter", "backend": BACKEND_BASE_URL})
 
 @app.get("/ready")
 def ready():
@@ -525,13 +455,22 @@ def adapter():
     result_payload = {
         "status": "ok",
         "request_id": user["request_id"],
-        "result_key": user["result_key"],
+        "result_key": user["result_key"],  # kept for echo; NOT used for polling
         "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
         "backend": backend_result,
         "correlation_id": g.cid,
     }
     if want_xml_echo or LOG_XML_ALWAYS:
         result_payload["xml"] = xml_body
+
+    # Make the response shape super clear in tools like Postman
+    # If backend_result contains fetch_target, ensure id_hint shows "response_id"
+    if isinstance(result_payload.get("backend"), dict):
+        bt = result_payload["backend"]
+        if isinstance(bt.get("fetch_target"), dict):
+            bt["fetch_target"]["id_hint"] = "response_id"
+        if "polling_with" in bt:
+            bt["polling_with"] = "response_id"
 
     return jsonify(result_payload)
 
