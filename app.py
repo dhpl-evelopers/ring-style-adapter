@@ -10,7 +10,6 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from urllib.parse import urljoin
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 # ==================== Config ====================
@@ -172,50 +171,36 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
     return user, normalized
 
-def _flatten_qas_to_text(qas: List[Dict[str, Any]]) -> str:
-    return "\n".join(f"{qa['question_text']} :: {qa['answer_text']}" for qa in qas)
-
+# ---------- XML builder (PascalCase) ----------
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
+    """
+    <Request>
+      <RequestId>...</RequestId>
+      <ResultKey>...</ResultKey>
+      <FullName>...</FullName>
+      <Email>...</Email>
+      <PhoneNumber>...</PhoneNumber>
+      <DateOfBirth>...</DateOfBirth>
+      <QuestionAnswers>
+        <QA><Question>..</Question><Answer>..</Answer></QA>
+        ...
+      </QuestionAnswers>
+    </Request>
+    """
     req = Element("Request")
-    for tag in ("request_id", "RequestId", "RequestID"):
-        SubElement(req, tag).text = user.get("request_id", "")
-    for tag in ("result_key", "ResultKey"):
-        SubElement(req, tag).text = user.get("result_key", "")
-    for tag in ("full_name", "FullName"):
-        SubElement(req, tag).text = user.get("full_name", "")
-    for tag in ("email", "Email"):
-        SubElement(req, tag).text = user.get("email", "")
-    for tag in ("phone_number", "PhoneNumber", "contact", "Contact"):
-        SubElement(req, tag).text = user.get("phone_number", "")
 
-    date_val = user.get("birth_date", "")
-    for tag in ("date_of_birth", "DateOfBirth", "dob", "DOB", "date", "Date"):
-        SubElement(req, tag).text = date_val
+    SubElement(req, "RequestId").text    = user.get("request_id", "") or ""
+    SubElement(req, "ResultKey").text    = user.get("result_key", "") or ""
+    SubElement(req, "FullName").text     = user.get("full_name", "") or ""
+    SubElement(req, "Email").text        = user.get("email", "") or ""
+    SubElement(req, "PhoneNumber").text  = user.get("phone_number", "") or ""
+    SubElement(req, "DateOfBirth").text  = user.get("birth_date", "") or ""
 
-    flat = _flatten_qas_to_text(qas)
-    for tag in ("qna_text", "QNA", "qna", "Qna",
-                "question_answers_text", "QuestionAnswersText", "questionAnswersText"):
-        SubElement(req, tag).text = flat
-
-    qa_json = json.dumps(
-        [{"question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
-        ensure_ascii=False
-    )
-    for tag in ("question_answers_json", "QuestionAnswersJson"):
-        SubElement(req, tag).text = qa_json
-
-    containers = [
-        ("question_answers", "qa", "question", "answer"),
-        ("QuestionAnswers", "QA", "Question", "Answer"),
-        ("questionAnswers", "qa", "question", "answer"),
-    ]
-    for cont_name, qa_tag, q_tag, a_tag in containers:
-        cont = SubElement(req, cont_name)
-        cont.text = flat
-        for qa in qas:
-            qa_el = SubElement(cont, qa_tag)
-            SubElement(qa_el, q_tag).text = qa["question_text"]
-            SubElement(qa_el, a_tag).text = qa["answer_text"]
+    qa_container = SubElement(req, "QuestionAnswers")
+    for qa in qas:
+        qa_el = SubElement(qa_container, "QA")
+        SubElement(qa_el, "Question").text = qa.get("question_text", "") or ""
+        SubElement(qa_el, "Answer").text   = qa.get("answer_text", "") or ""
 
     return tostring(req, encoding="unicode")
 
@@ -245,8 +230,7 @@ def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]
 
 def _extract_response_id(create_json: Optional[Dict[str, Any]], headers: Dict[str, Any]) -> Optional[str]:
     """
-    Normalize any 'id-like' field into response_id.
-    We DO NOT accept result_key here (Option 1).
+    Normalize any 'id-like' field into response_id. (Option 1)
     """
     if create_json:
         id_keys = [
@@ -260,14 +244,10 @@ def _extract_response_id(create_json: Optional[Dict[str, Any]], headers: Dict[st
             if val and str(val).strip():
                 return str(val).strip()
 
-        # HAL / links that encode the id in a templated URL are uncommon; skip.
-
-    # Location header with direct URL (rare for your flow) — attempt to parse query ?response_id=...
     loc = headers.get("Location") or headers.get("location")
     if loc and str(loc).strip():
-        # If the backend returned a full fetch URL, we won't parse — caller will poll by link (not used here).
+        # If backend returned a full URL, we don't parse here.
         return None
-
     return None
 
 def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, Any]:
@@ -275,8 +255,8 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
     headers = {"Content-Type": "application/xml", "Accept": "application/json, */*"}
 
     logger.info("POST %s cid=%s", create_url, cid)
-    logger.info("xml_string :  %s", xml_body)
-    logger.debug("XML cid=%s payload=%s", cid, xml_body)
+    if LOG_XML_ALWAYS:
+        logger.info("XML cid=%s payload=%s", cid, xml_body)
 
     # 1) CREATE
     resp = HTTP.post(create_url, data=xml_body.encode("utf-8"), headers=headers, timeout=BACKEND_TIMEOUT_S)
@@ -287,7 +267,6 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
     try:
         create_json = resp.json()
     except Exception:
-        # Non-JSON final
         return {"backend_raw": resp.text, "polling_with": None}
 
     def _is_final(d: Dict[str, Any]) -> bool:
@@ -303,10 +282,9 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
     if _is_final(create_json):
         return {"backend_final": create_json, "polling_with": None}
 
-    # 2) Strictly pick a response_id to poll with (Option 1)
+    # 2) Strictly use response_id for polling (Option 1)
     response_id = _extract_response_id(create_json, resp.headers)
     if not response_id:
-        # No usable ID => return create body so caller can inspect; do NOT poll with result_key
         return {"backend_create": create_json, "polling_with": None}
 
     fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
@@ -443,28 +421,26 @@ def adapter():
         })
 
     xml_body = _xml_superset(user, qas)
-    want_xml_echo = (request.headers.get("X-Debug-XML", "0").lower() in ("1", "true", "yes"))
+    if LOG_XML_ALWAYS:
+        logger.info("Built XML cid=%s: %s", g.cid, xml_body)
 
     try:
         backend_result = _call_backend(xml_body, g.cid, user)
     except Exception as e:
         logger.exception("Backend call failed cid=%s", g.cid)
-        body = {"details": str(e), "xml": xml_body} if want_xml_echo or LOG_XML_ALWAYS else {"details": str(e)}
+        body = {"details": str(e), "xml": xml_body} if LOG_XML_ALWAYS else {"details": str(e)}
         return _json_error(502, "backend_error", "Upstream backend call failed", body)
 
     result_payload = {
         "status": "ok",
         "request_id": user["request_id"],
-        "result_key": user["result_key"],  # kept for echo; NOT used for polling
+        "result_key": user["result_key"],  # echo only; NOT used for polling
         "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
         "backend": backend_result,
         "correlation_id": g.cid,
     }
-    if want_xml_echo or LOG_XML_ALWAYS:
-        result_payload["xml"] = xml_body
 
-    # Make the response shape super clear in tools like Postman
-    # If backend_result contains fetch_target, ensure id_hint shows "response_id"
+    # Make the response shape super clear for tools like Postman
     if isinstance(result_payload.get("backend"), dict):
         bt = result_payload["backend"]
         if isinstance(bt.get("fetch_target"), dict):
