@@ -30,7 +30,7 @@ MAX_CONTENT_LENGTH  = int(_getenv("MAX_CONTENT_LENGTH", str(512 * 1024)))
 LOG_LEVEL           = _getenv("LOG_LEVEL", "INFO").upper()
 LOG_XML_ALWAYS      = _getenv("LOG_XML_ALWAYS", "false").lower() == "true"
 
-# —— Option-1 hard standardization (never poll with result_key/request_id)
+# —— Option-1: Only poll with response_id (never result_key/request_id)
 PREFER_RESULT_KEY_WHEN_NO_ID = False
 
 # ==================== App / Logging ====================
@@ -114,6 +114,93 @@ def _load_mapping(path: str) -> Optional[Mapping]:
 
 MAPPING = _load_mapping(MAPPING_PATH)
 
+# ==================== Flex Q&A helpers ====================
+
+def _flex_str(x: Any) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, bool):
+        return "1" if x else "0"
+    return str(x)
+
+def _pick_first_truthy(*vals):
+    for v in vals:
+        if v is None:
+            continue
+        if isinstance(v, str) and v.strip() == "":
+            continue
+        return v
+    return None
+
+def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Accept multiple UI shapes and return (question_text, answer_text).
+    """
+    if not isinstance(item, dict):
+        return "", ""
+
+    # QUESTION CANDIDATES
+    q = _pick_first_truthy(
+        item.get("question"),
+        item.get("q"),
+        item.get("label"),
+        item.get("title"),
+        item.get("text"),
+        item.get("id"),
+        item.get("key"),
+    )
+
+    # ANSWER CANDIDATES (flat)
+    a = _pick_first_truthy(
+        item.get("answer"),
+        item.get("value"),
+        item.get("option"),
+        item.get("selected"),
+        item.get("choice"),
+        item.get("val"),
+    )
+
+    # NESTED: selectedOption.value / selected_option.value / option.value
+    if a is None:
+        sel = _pick_first_truthy(
+            (item.get("selectedOption") or {}).get("value") if isinstance(item.get("selectedOption"), dict) else None,
+            (item.get("selected_option") or {}).get("value") if isinstance(item.get("selected_option"), dict) else None,
+            (item.get("option") or {}).get("value") if isinstance(item.get("option"), dict) else None,
+        )
+        if sel is not None:
+            a = sel
+
+    # LISTS: answers[], options[], choices[]
+    if a is None:
+        for key in ("answers", "options", "choices"):
+            arr = item.get(key)
+            if isinstance(arr, list) and arr:
+                picked: List[str] = []
+                for el in arr:
+                    if isinstance(el, dict):
+                        if el.get("selected") is True:
+                            picked.append(_flex_str(_pick_first_truthy(el.get("value"), el.get("label"), el.get("text"))))
+                    else:
+                        picked.append(_flex_str(el))
+                if not picked:
+                    for el in arr:
+                        if isinstance(el, dict):
+                            cand = _pick_first_truthy(el.get("value"), el.get("label"), el.get("text"))
+                            if cand:
+                                picked.append(_flex_str(cand))
+                                break
+                        else:
+                            if el:
+                                picked.append(_flex_str(el))
+                                break
+                if picked:
+                    a = ", ".join([p for p in picked if p != ""])
+                    break
+
+    q_text = _flex_str(q)
+    a_text = _flex_str(a)
+    return q_text, a_text
+
 # ==================== Helpers ====================
 
 def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
@@ -123,6 +210,28 @@ def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
     if not key:
         return "Missing API key header 'x-api-key'."
     return None
+
+def _ensure_list_qas(raw_qas: Any) -> List[Any]:
+    """
+    Accept list or stringified JSON or dict with 'qas'/'items' etc.
+    """
+    if isinstance(raw_qas, list):
+        return raw_qas
+    if isinstance(raw_qas, dict):
+        for k in ("qas", "items", "data"):
+            v = raw_qas.get(k)
+            if isinstance(v, list):
+                return v
+    if isinstance(raw_qas, str):
+        s = raw_qas.strip()
+        if s:
+            try:
+                val = json.loads(s)
+                if isinstance(val, list):
+                    return val
+            except Exception:
+                pass
+    return []
 
 def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     user = {
@@ -135,30 +244,37 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         "test_mode":    payload.get("test_mode") or "live",
     }
 
-    raw_qas = payload.get("questionAnswers") or payload.get("question_answers") or []
+    raw_qas_input = payload.get("questionAnswers") or payload.get("question_answers") or []
+    raw_qas = _ensure_list_qas(raw_qas_input)
+
     if not isinstance(raw_qas, list):
-        raise ValueError(json.dumps({"error": "questionAnswers must be a list"}))
+        raise ValueError(json.dumps({"error": "questionAnswers must be a list or JSON string"}))
 
     normalized: List[Dict[str, Any]] = []
     seen = set()
+
     for item in raw_qas:
-        if not isinstance(item, dict):
-            continue
-        label = item.get("question") or item.get("id") or item.get("key") or ""
-        ans   = item.get("answer") or ""
-        q_key = mapping.resolve_q_key(str(label))
+        # Flexible extraction
+        q_text_in, a_text_in = _extract_question_and_answer(item)
+        if not q_text_in:
+            # fallback to legacy fields if extractor couldn't find a label
+            q_text_in = _flex_str((isinstance(item, dict) and (item.get("question") or item.get("id") or item.get("key"))) or "")
+
+        q_key = mapping.resolve_q_key(q_text_in)
         if not q_key:
             if mapping.allow_unknown:
                 continue
-            raise ValueError(json.dumps({"error": "Unknown question", "question_received": label}))
+            raise ValueError(json.dumps({"error": "Unknown question", "question_received": q_text_in}))
+
         meta = mapping.questions[q_key]
         normalized.append({
             "key": q_key,
             "question_text": meta.get("canonical_label") or q_key,
-            "answer_text": mapping.normalize_answer(q_key, str(ans))
+            "answer_text": mapping.normalize_answer(q_key, a_text_in),
         })
         seen.add(q_key)
 
+    # Conditional required question example
     purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
     if purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
         raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
@@ -171,27 +287,20 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
     return user, normalized
 
-# ---------- XML builder (matches backend/main.py expectations) ----------
+# ---------- XML builder (matches backend expectations) ----------
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     """
-    Build XML that matches backend parsing in createRequest:
-
-      <Request>
-        <full_name>...</full_name>
-        <email>...</email>
-        <phone_number>...</phone_number>
-        <result_key>...</result_key>   # backend uses as request_id
-        <date>...</date>               # birth date
-        <questionAnswers>[...]</questionAnswers>  # stringified JSON with selectedOption.value
-      </Request>
+    Backend expects:
+      <full_name>, <email>, <phone_number>, <result_key>, <date>,
+      <questionAnswers>  // stringified JSON: [{question, selectedOption:{value}}]
     """
-    # Backend uses result_key as request_id. Ensure we always send one.
     result_key = (user.get("result_key") or user.get("request_id") or str(uuid.uuid4())).strip()
 
-    # questionAnswers: [{"question":"...", "selectedOption":{"value":"..."}}]
     qa_payload = [
-        {"question": qa.get("question_text", "") or "",
-         "selectedOption": {"value": qa.get("answer_text", "") or ""}}
+        {
+            "question": qa.get("question_text", "") or "",
+            "selectedOption": {"value": qa.get("answer_text", "") or ""}
+        }
         for qa in qas
     ]
     qa_json_str = json.dumps(qa_payload, ensure_ascii=False)
@@ -202,7 +311,7 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     SubElement(req, "phone_number").text = user.get("phone_number", "") or user.get("contact", "") or ""
     SubElement(req, "result_key").text   = result_key
     SubElement(req, "date").text         = user.get("birth_date", "") or user.get("dob", "") or user.get("date", "") or ""
-    SubElement(req, "questionAnswers").text = qa_json_str  # IMPORTANT: stringified JSON
+    SubElement(req, "questionAnswers").text = qa_json_str
 
     return tostring(req, encoding="unicode")
 
@@ -231,15 +340,12 @@ def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]
     return 0.7
 
 def _extract_response_id(create_json: Optional[Dict[str, Any]], headers: Dict[str, Any]) -> Optional[str]:
-    """
-    Normalize any 'id-like' field into response_id. (Option 1)
-    """
     if create_json:
         id_keys = [
             "response_id", "ResponseId", "responseId",
             "id", "Id",
             "code", "Code",
-            "requestId", "request_id"
+            "requestId", "request_id",
         ]
         for k in id_keys:
             val = create_json.get(k)
@@ -258,7 +364,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
     if LOG_XML_ALWAYS:
         logger.info("XML cid=%s payload=%s", cid, xml_body)
 
-    # 1) CREATE
+    # CREATE
     resp = HTTP.post(create_url, data=xml_body.encode("utf-8"), headers=headers, timeout=BACKEND_TIMEOUT_S)
     if resp.status_code >= 400:
         raise RuntimeError(f"Backend createRequest failed: {resp.status_code} {resp.text}")
@@ -270,7 +376,6 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
         return {"backend_raw": resp.text, "polling_with": None}
 
     def _is_final(d: Dict[str, Any]) -> bool:
-        # Treat presence of 'data' or 'result' as final (your backend returns {"status":200,"data":...})
         if "data" in d or "result" in d:
             return True
         status = str(d.get("status") or d.get("Status") or "").lower()
@@ -283,7 +388,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
     if _is_final(create_json):
         return {"backend_final": create_json, "polling_with": None}
 
-    # 2) Strictly use response_id for polling (if backend ever returns one)
+    # Poll only if a response_id is explicitly returned
     response_id = _extract_response_id(create_json, resp.headers)
     if not response_id:
         return {"backend_create": create_json, "polling_with": None}
@@ -412,7 +517,7 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
-    # Normalize-only mode (debugging)
+    # Debug-only: return normalized without calling backend
     if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
         return jsonify({
             "status": "ok",
@@ -436,13 +541,12 @@ def adapter():
     result_payload = {
         "status": "ok",
         "request_id": user["request_id"],
-        "result_key": user["result_key"],  # echo only; NOT used for polling
+        "result_key": user["result_key"],  # echo only
         "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
         "backend": backend_result,
         "correlation_id": g.cid,
     }
 
-    # Make the response shape explicit for tools like Postman
     if isinstance(result_payload.get("backend"), dict):
         bt = result_payload["backend"]
         if isinstance(bt.get("fetch_target"), dict):
