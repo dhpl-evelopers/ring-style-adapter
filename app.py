@@ -30,10 +30,11 @@ MAX_CONTENT_LENGTH  = int(_getenv("MAX_CONTENT_LENGTH", str(512 * 1024)))
 LOG_LEVEL           = _getenv("LOG_LEVEL", "INFO").upper()
 LOG_XML_ALWAYS      = _getenv("LOG_XML_ALWAYS", "false").lower() == "true"
 
-# —— Option-1: Only poll with response_id (never result_key/request_id)
-PREFER_RESULT_KEY_WHEN_NO_ID = False
-
-# ==================== App / Logging ====================
+# —— NEW: behaviour switches ——————————————————————————
+REQUIRE_ONLY_USER_FIELDS = _getenv("REQUIRE_ONLY_USER_FIELDS", "true").lower() == "true"
+POSITIONAL_QA_ENABLED    = _getenv("POSITIONAL_QA_ENABLED", "true").lower() == "true"
+REQUIRE_RESULT_KEY       = _getenv("REQUIRE_RESULT_KEY", "true").lower() == "true"
+# ————————————————————————————————————————————————————
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -139,7 +140,6 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
     if not isinstance(item, dict):
         return "", ""
 
-    # QUESTION CANDIDATES
     q = _pick_first_truthy(
         item.get("question"),
         item.get("q"),
@@ -150,7 +150,6 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
         item.get("key"),
     )
 
-    # ANSWER CANDIDATES (flat)
     a = _pick_first_truthy(
         item.get("answer"),
         item.get("value"),
@@ -160,7 +159,6 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
         item.get("val"),
     )
 
-    # NESTED: selectedOption.value / selected_option.value / option.value
     if a is None:
         sel = _pick_first_truthy(
             (item.get("selectedOption") or {}).get("value") if isinstance(item.get("selectedOption"), dict) else None,
@@ -170,7 +168,6 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
         if sel is not None:
             a = sel
 
-    # LISTS: answers[], options[], choices[]
     if a is None:
         for key in ("answers", "options", "choices"):
             arr = item.get(key)
@@ -211,14 +208,34 @@ def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
         return "Missing API key header 'x-api-key'."
     return None
 
+# —— NEW: only-user-fields enforcement ————————————————
+def _require_user_fields(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    missing = []
+    if not (user.get("full_name") or "").strip():
+        missing.append("name/full_name")
+    if not (user.get("email") or "").strip():
+        missing.append("email")
+    if not (user.get("phone_number") or "").strip():
+        missing.append("phone_number")
+    if not (user.get("birth_date") or "").strip():
+        missing.append("birth_date")
+    rk = (user.get("result_key") or "").strip()
+    if REQUIRE_RESULT_KEY and not rk:
+        missing.append("result_key")
+    if missing:
+        return {"error": "Mandatory user fields missing", "missing": missing}
+    return None
+# ————————————————————————————————————————————————
+
 def _ensure_list_qas(raw_qas: Any) -> List[Any]:
     """
-    Accept list or stringified JSON or dict with 'qas'/'items' etc.
+    Accept list or stringified JSON or dict with 'qas'/'items'/'data' OR
+    'answers' (list of strings) OR plain list of strings (answers-only).
     """
     if isinstance(raw_qas, list):
         return raw_qas
     if isinstance(raw_qas, dict):
-        for k in ("qas", "items", "data"):
+        for k in ("qas", "items", "data", "answers"):
             v = raw_qas.get(k)
             if isinstance(v, list):
                 return v
@@ -229,6 +246,11 @@ def _ensure_list_qas(raw_qas: Any) -> List[Any]:
                 val = json.loads(s)
                 if isinstance(val, list):
                     return val
+                if isinstance(val, dict):
+                    for k in ("qas", "items", "data", "answers"):
+                        v = val.get(k)
+                        if isinstance(v, list):
+                            return v
             except Exception:
                 pass
     return []
@@ -244,58 +266,76 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         "test_mode":    payload.get("test_mode") or "live",
     }
 
+    # NEW: only user fields mandatory
+    uf_err = _require_user_fields(user)
+    if uf_err:
+        raise ValueError(json.dumps(uf_err))
+
     raw_qas_input = payload.get("questionAnswers") or payload.get("question_answers") or []
     raw_qas = _ensure_list_qas(raw_qas_input)
-
     if not isinstance(raw_qas, list):
         raise ValueError(json.dumps({"error": "questionAnswers must be a list or JSON string"}))
 
     normalized: List[Dict[str, Any]] = []
     seen = set()
 
+    # flexible extraction for dict-like entries
+    answers_only_buffer: List[str] = []
     for item in raw_qas:
-        # Flexible extraction
+        if isinstance(item, str):
+            answers_only_buffer.append(item)
+            continue
         q_text_in, a_text_in = _extract_question_and_answer(item)
-        if not q_text_in:
-            # fallback to legacy fields if extractor couldn't find a label
-            q_text_in = _flex_str((isinstance(item, dict) and (item.get("question") or item.get("id") or item.get("key"))) or "")
+        if not q_text_in and isinstance(item, dict):
+            q_text_in = _flex_str(item.get("question") or item.get("id") or item.get("key") or "")
+        if q_text_in:
+            q_key = mapping.resolve_q_key(q_text_in)
+            if not q_key:
+                if mapping.allow_unknown:
+                    continue
+                raise ValueError(json.dumps({"error": "Unknown question", "question_received": q_text_in}))
+            meta = mapping.questions[q_key]
+            normalized.append({
+                "key": q_key,
+                "question_text": meta.get("canonical_label") or q_key,
+                "answer_text": mapping.normalize_answer(q_key, a_text_in),
+            })
+            seen.add(q_key)
 
-        q_key = mapping.resolve_q_key(q_text_in)
-        if not q_key:
-            if mapping.allow_unknown:
-                continue
-            raise ValueError(json.dumps({"error": "Unknown question", "question_received": q_text_in}))
+    # NEW: positional mapping for answers-only shapes
+    if POSITIONAL_QA_ENABLED and answers_only_buffer:
+        order_keys = mapping.must_have_keys[:] if mapping.must_have_keys else list(mapping.questions.keys())
+        for idx, ans in enumerate(answers_only_buffer):
+            if idx >= len(order_keys):
+                break
+            q_key = order_keys[idx]
+            meta = mapping.questions.get(q_key, {"canonical_label": q_key})
+            normalized.append({
+                "key": q_key,
+                "question_text": meta.get("canonical_label") or q_key,
+                "answer_text": _flex_str(ans)
+            })
+            seen.add(q_key)
 
-        meta = mapping.questions[q_key]
-        normalized.append({
-            "key": q_key,
-            "question_text": meta.get("canonical_label") or q_key,
-            "answer_text": mapping.normalize_answer(q_key, a_text_in),
-        })
-        seen.add(q_key)
-
-    # Conditional required question example
+    # Conditional example: enforce relation only if that key exists
     purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
     if purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
-        raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
+        if "q1b_relation" in mapping.questions:
+            raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
 
-    missing = [k for k in mapping.must_have_keys if k not in seen]
-    if missing:
-        raise ValueError(json.dumps({"error": "Mandatory questions missing", "missing_keys": missing}))
+    # If we explicitly want to also enforce mapping.must_have_keys, toggle via env
+    if not REQUIRE_ONLY_USER_FIELDS:
+        missing = [k for k in mapping.must_have_keys if k not in seen]
+        if missing:
+            raise ValueError(json.dumps({"error": "Mandatory questions missing", "missing_keys": missing}))
 
-    order = {k: i for i, k in enumerate(mapping.must_have_keys)}
+    order = {k: i for i, k in enumerate(mapping.must_have_keys)} if mapping.must_have_keys else {}
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
     return user, normalized
 
-# ---------- XML builder (matches backend expectations) ----------
+# ---------- XML builder ----------
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
-    """
-    Backend expects:
-      <full_name>, <email>, <phone_number>, <result_key>, <date>,
-      <questionAnswers>  // stringified JSON: [{question, selectedOption:{value}}]
-    """
     result_key = (user.get("result_key") or user.get("request_id") or str(uuid.uuid4())).strip()
-
     qa_payload = [
         {
             "question": qa.get("question_text", "") or "",
@@ -312,7 +352,6 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     SubElement(req, "result_key").text   = result_key
     SubElement(req, "date").text         = user.get("birth_date", "") or user.get("dob", "") or user.get("date", "") or ""
     SubElement(req, "questionAnswers").text = qa_json_str
-
     return tostring(req, encoding="unicode")
 
 def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]]) -> float:
@@ -341,12 +380,7 @@ def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]
 
 def _extract_response_id(create_json: Optional[Dict[str, Any]], headers: Dict[str, Any]) -> Optional[str]:
     if create_json:
-        id_keys = [
-            "response_id", "ResponseId", "responseId",
-            "id", "Id",
-            "code", "Code",
-            "requestId", "request_id",
-        ]
+        id_keys = ["response_id","ResponseId","responseId","id","Id","code","Code","requestId","request_id"]
         for k in id_keys:
             val = create_json.get(k)
             if val and str(val).strip():
@@ -359,12 +393,10 @@ def _extract_response_id(create_json: Optional[Dict[str, Any]], headers: Dict[st
 def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, Any]:
     create_url = f"{BACKEND_BASE_URL}{CREATE_PATH}"
     headers = {"Content-Type": "application/xml", "Accept": "application/json, */*"}
-
     logger.info("POST %s cid=%s", create_url, cid)
     if LOG_XML_ALWAYS:
         logger.info("XML cid=%s payload=%s", cid, xml_body)
 
-    # CREATE
     resp = HTTP.post(create_url, data=xml_body.encode("utf-8"), headers=headers, timeout=BACKEND_TIMEOUT_S)
     if resp.status_code >= 400:
         raise RuntimeError(f"Backend createRequest failed: {resp.status_code} {resp.text}")
@@ -379,7 +411,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
         if "data" in d or "result" in d:
             return True
         status = str(d.get("status") or d.get("Status") or "").lower()
-        if status in ("done", "completed", "ok", "success", "ready", "finished"):
+        if status in ("done","completed","ok","success","ready","finished"):
             return True
         if d.get("done") is True or d.get("ready") is True or d.get("is_ready") is True:
             return True
@@ -388,7 +420,6 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
     if _is_final(create_json):
         return {"backend_final": create_json, "polling_with": None}
 
-    # Poll only if a response_id is explicitly returned
     response_id = _extract_response_id(create_json, resp.headers)
     if not response_id:
         return {"backend_create": create_json, "polling_with": None}
@@ -399,12 +430,8 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
 
     while time.time() < deadline:
         try:
-            r = HTTP.get(
-                fetch_url,
-                params={"response_id": response_id},
-                headers={"Accept": "application/json, */*"},
-                timeout=BACKEND_TIMEOUT_S
-            )
+            r = HTTP.get(fetch_url, params={"response_id": response_id},
+                         headers={"Accept": "application/json, */*"}, timeout=BACKEND_TIMEOUT_S)
 
             if r.status_code == 202:
                 time.sleep(_get_retry_after(r, None))
@@ -438,7 +465,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
 
             last = data
             status = str(data.get("status") or data.get("Status") or "").lower()
-            if status in ("done", "completed", "ok", "success", "ready", "finished") or data.get("done") is True:
+            if status in ("done","completed","ok","success","ready","finished") or data.get("done") is True:
                 return {
                     "backend_final": data,
                     "polling_with": "response_id",
@@ -517,8 +544,8 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
-    # Debug-only: return normalized without calling backend
-    if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
+    # NOTE: even if qas is empty, we proceed to backend call (as requested)
+    if str(payload.get("normalize_only", "")).lower() in ("1","true","yes"):
         return jsonify({
             "status": "ok",
             "request_id": user["request_id"],
@@ -541,7 +568,7 @@ def adapter():
     result_payload = {
         "status": "ok",
         "request_id": user["request_id"],
-        "result_key": user["result_key"],  # echo only
+        "result_key": user["result_key"],
         "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
         "backend": backend_result,
         "correlation_id": g.cid,
