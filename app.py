@@ -12,6 +12,10 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from xml.etree.ElementTree import Element, SubElement, tostring
 
+# NEW: database imports
+import psycopg2
+from psycopg2.extras import execute_values
+
 # ==================== Config ====================
 
 def _getenv(name: str, default: Optional[str] = None, required: bool = False) -> str:
@@ -61,6 +65,65 @@ def _session() -> requests.Session:
     return s
 
 HTTP = _session()
+
+# ==================== Database helpers (PROD) ====================
+
+def _get_db_conn():
+    """Hardcoded production connection to Azure PostgreSQL."""
+    return psycopg2.connect(
+        host="projectai-pict-postgresql.postgres.database.azure.com",
+        dbname="projectai-ringsandi-pict",
+        user="postgres",
+        password="Apollo11",
+        port=5432,
+        sslmode="require",
+    )
+
+def _store_request_and_qna(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> None:
+    """
+    Insert one row in `requests` and many rows in `requests_qna`.
+    Tables expected:
+      requests(request_id, name, email, phonenumber, birth_date, timestamp)
+      requests_qna(qna_id, request_id, question, answer, index)
+    """
+    try:
+        conn = _get_db_conn()
+        cur = conn.cursor()
+
+        # Insert into requests (idempotent on request_id)
+        cur.execute("""
+            INSERT INTO requests (request_id, name, email, phonenumber, birth_date, timestamp)
+            VALUES (%s,%s,%s,%s,%s, NOW())
+            ON CONFLICT (request_id) DO NOTHING
+        """, (
+            user.get("result_key", ""),
+            user.get("full_name", ""),
+            user.get("email", ""),
+            user.get("phone_number", ""),
+            user.get("birth_date", "")
+        ))
+
+        # Insert Q&As
+        if qas:
+            qna_rows = [
+                (str(uuid.uuid4()),
+                 user.get("result_key", ""),
+                 qa.get("question_text", ""),
+                 qa.get("answer_text", ""),
+                 idx)
+                for idx, qa in enumerate(qas)
+            ]
+            execute_values(cur, """
+                INSERT INTO requests_qna (qna_id, request_id, question, answer, index)
+                VALUES %s
+            """, qna_rows)
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("DB saved request=%s qna_count=%d", user.get("result_key",""), len(qas))
+    except Exception as e:
+        logger.exception("DB insert failed: %s", e)
 
 # ==================== Mapping ====================
 
@@ -208,7 +271,7 @@ def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
         return "Missing API key header 'x-api-key'."
     return None
 
-# —— NEW: only-user-fields enforcement ————————————————
+# —— only-user-fields enforcement ————————————————
 def _require_user_fields(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     missing = []
     if not (user.get("full_name") or "").strip():
@@ -266,7 +329,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         "test_mode":    payload.get("test_mode") or "live",
     }
 
-    # NEW: only user fields mandatory
+    # only user fields mandatory
     uf_err = _require_user_fields(user)
     if uf_err:
         raise ValueError(json.dumps(uf_err))
@@ -302,7 +365,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
             })
             seen.add(q_key)
 
-    # NEW: positional mapping for answers-only shapes
+    # positional mapping for answers-only shapes
     if POSITIONAL_QA_ENABLED and answers_only_buffer:
         order_keys = mapping.must_have_keys[:] if mapping.must_have_keys else list(mapping.questions.keys())
         for idx, ans in enumerate(answers_only_buffer):
@@ -323,7 +386,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         if "q1b_relation" in mapping.questions:
             raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
 
-    # If we explicitly want to also enforce mapping.must_have_keys, toggle via env
+    # Optional: enforce mapping.must_have_keys as well (toggle via env)
     if not REQUIRE_ONLY_USER_FIELDS:
         missing = [k for k in mapping.must_have_keys if k not in seen]
         if missing:
@@ -424,7 +487,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
     if not response_id:
         return {"backend_create": create_json, "polling_with": None}
 
-    fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
+    fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"""
     deadline = time.time() + BACKEND_TIMEOUT_S
     last: Any = None
 
@@ -544,7 +607,10 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
-    # NOTE: even if qas is empty, we proceed to backend call (as requested)
+    # Save to DB (requests + requests_qna)
+    _store_request_and_qna(user, qas)
+
+    # Debug-only: return normalized without calling backend
     if str(payload.get("normalize_only", "")).lower() in ("1","true","yes"):
         return jsonify({
             "status": "ok",
