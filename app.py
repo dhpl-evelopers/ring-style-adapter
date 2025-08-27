@@ -12,6 +12,10 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from xml.etree.ElementTree import Element, SubElement, tostring
 
+# ===== DB =====
+import psycopg2
+from psycopg2.extras import execute_values
+
 # ==================== Config ====================
 
 def _getenv(name: str, default: Optional[str] = None, required: bool = False) -> str:
@@ -30,11 +34,12 @@ MAX_CONTENT_LENGTH  = int(_getenv("MAX_CONTENT_LENGTH", str(512 * 1024)))
 LOG_LEVEL           = _getenv("LOG_LEVEL", "INFO").upper()
 LOG_XML_ALWAYS      = _getenv("LOG_XML_ALWAYS", "false").lower() == "true"
 
-# —— NEW: behaviour switches ——————————————————————————
+# Behavior switches
 REQUIRE_ONLY_USER_FIELDS = _getenv("REQUIRE_ONLY_USER_FIELDS", "true").lower() == "true"
 POSITIONAL_QA_ENABLED    = _getenv("POSITIONAL_QA_ENABLED", "true").lower() == "true"
 REQUIRE_RESULT_KEY       = _getenv("REQUIRE_RESULT_KEY", "true").lower() == "true"
-# ————————————————————————————————————————————————————
+
+# ==================== App / Logging ====================
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -61,6 +66,67 @@ def _session() -> requests.Session:
     return s
 
 HTTP = _session()
+
+# ==================== Database helpers (PROD) ====================
+
+def _get_db_conn():
+    """Azure PostgreSQL connection (prod)."""
+    return psycopg2.connect(
+        host="projectai-pict-postgresql.postgres.database.azure.com",
+        dbname="projectai-ringsandi-pict",
+        user="postgres",
+        password="Apollo11",
+        port=5432,
+        sslmode="require",
+    )
+
+def _store_request_and_qna(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> None:
+    """
+    Insert one row in `requests` and many rows in `requests_qna`.
+
+    requests(request_id PK, name, email, phonenumber, birth_date, timestamp)
+    requests_qna(qna_id PK, request_id FK, question, answer, index)
+    """
+    try:
+        conn = _get_db_conn()
+        cur = conn.cursor()
+
+        # Save the request row (idempotent on request_id)
+        cur.execute("""
+            INSERT INTO requests (request_id, name, email, phonenumber, birth_date, timestamp)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (request_id) DO NOTHING
+        """, (
+            user.get("result_key", ""),
+            user.get("full_name", ""),
+            user.get("email", ""),
+            user.get("phone_number", ""),
+            user.get("birth_date", "")
+        ))
+
+        # Save Q&As (if any)
+        if qas:
+            rows = [
+                (
+                    str(uuid.uuid4()),
+                    user.get("result_key", ""),
+                    qa.get("question_text", ""),
+                    qa.get("answer_text", ""),
+                    idx
+                )
+                for idx, qa in enumerate(qas)
+            ]
+            execute_values(cur, """
+                INSERT INTO requests_qna (qna_id, request_id, question, answer, index)
+                VALUES %s
+            """, rows)
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("DB saved: request_id=%s qna_count=%d", user.get("result_key",""), len(qas))
+    except Exception as e:
+        logger.exception("DB insert failed: %s", e)
 
 # ==================== Mapping ====================
 
@@ -115,7 +181,7 @@ def _load_mapping(path: str) -> Optional[Mapping]:
 
 MAPPING = _load_mapping(MAPPING_PATH)
 
-# ==================== Flex Q&A helpers ====================
+# ==================== Flexible Q&A helpers ====================
 
 def _flex_str(x: Any) -> str:
     if x is None:
@@ -134,9 +200,7 @@ def _pick_first_truthy(*vals):
     return None
 
 def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
-    """
-    Accept multiple UI shapes and return (question_text, answer_text).
-    """
+    """Accept multiple UI shapes and return (question_text, answer_text)."""
     if not isinstance(item, dict):
         return "", ""
 
@@ -159,6 +223,7 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
         item.get("val"),
     )
 
+    # selectedOption.value / selected_option.value / option.value
     if a is None:
         sel = _pick_first_truthy(
             (item.get("selectedOption") or {}).get("value") if isinstance(item.get("selectedOption"), dict) else None,
@@ -168,6 +233,7 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
         if sel is not None:
             a = sel
 
+    # answers[] / options[] / choices[]
     if a is None:
         for key in ("answers", "options", "choices"):
             arr = item.get(key)
@@ -194,11 +260,9 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
                     a = ", ".join([p for p in picked if p != ""])
                     break
 
-    q_text = _flex_str(q)
-    a_text = _flex_str(a)
-    return q_text, a_text
+    return _flex_str(q), _flex_str(a)
 
-# ==================== Helpers ====================
+# ==================== Validation ====================
 
 def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
     if not API_KEY_REQUIRED:
@@ -208,7 +272,6 @@ def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
         return "Missing API key header 'x-api-key'."
     return None
 
-# —— NEW: only-user-fields enforcement ————————————————
 def _require_user_fields(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     missing = []
     if not (user.get("full_name") or "").strip():
@@ -225,7 +288,6 @@ def _require_user_fields(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if missing:
         return {"error": "Mandatory user fields missing", "missing": missing}
     return None
-# ————————————————————————————————————————————————
 
 def _ensure_list_qas(raw_qas: Any) -> List[Any]:
     """
@@ -266,10 +328,9 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         "test_mode":    payload.get("test_mode") or "live",
     }
 
-    # NEW: only user fields mandatory
-    uf_err = _require_user_fields(user)
-    if uf_err:
-        raise ValueError(json.dumps(uf_err))
+    err = _require_user_fields(user)
+    if err:
+        raise ValueError(json.dumps(err))
 
     raw_qas_input = payload.get("questionAnswers") or payload.get("question_answers") or []
     raw_qas = _ensure_list_qas(raw_qas_input)
@@ -279,7 +340,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     normalized: List[Dict[str, Any]] = []
     seen = set()
 
-    # flexible extraction for dict-like entries
+    # dict-like entries
     answers_only_buffer: List[str] = []
     for item in raw_qas:
         if isinstance(item, str):
@@ -302,7 +363,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
             })
             seen.add(q_key)
 
-    # NEW: positional mapping for answers-only shapes
+    # answers-only positional mapping
     if POSITIONAL_QA_ENABLED and answers_only_buffer:
         order_keys = mapping.must_have_keys[:] if mapping.must_have_keys else list(mapping.questions.keys())
         for idx, ans in enumerate(answers_only_buffer):
@@ -317,13 +378,13 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
             })
             seen.add(q_key)
 
-    # Conditional example: enforce relation only if that key exists
+    # conditional example
     purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
     if purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
         if "q1b_relation" in mapping.questions:
             raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
 
-    # If we explicitly want to also enforce mapping.must_have_keys, toggle via env
+    # optionally enforce mapping.must_have_keys as well
     if not REQUIRE_ONLY_USER_FIELDS:
         missing = [k for k in mapping.must_have_keys if k not in seen]
         if missing:
@@ -337,10 +398,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     result_key = (user.get("result_key") or user.get("request_id") or str(uuid.uuid4())).strip()
     qa_payload = [
-        {
-            "question": qa.get("question_text", "") or "",
-            "selectedOption": {"value": qa.get("answer_text", "") or ""}
-        }
+        {"question": qa.get("question_text", "") or "", "selectedOption": {"value": qa.get("answer_text", "") or ""}}
         for qa in qas
     ]
     qa_json_str = json.dumps(qa_payload, ensure_ascii=False)
@@ -380,8 +438,7 @@ def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]
 
 def _extract_response_id(create_json: Optional[Dict[str, Any]], headers: Dict[str, Any]) -> Optional[str]:
     if create_json:
-        id_keys = ["response_id","ResponseId","responseId","id","Id","code","Code","requestId","request_id"]
-        for k in id_keys:
+        for k in ["response_id","ResponseId","responseId","id","Id","code","Code","requestId","request_id"]:
             val = create_json.get(k)
             if val and str(val).strip():
                 return str(val).strip()
@@ -411,11 +468,12 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
         if "data" in d or "result" in d:
             return True
         status = str(d.get("status") or d.get("Status") or "").lower()
-        if status in ("done","completed","ok","success","ready","finished"):
-            return True
-        if d.get("done") is True or d.get("ready") is True or d.get("is_ready") is True:
-            return True
-        return False
+        return (
+            status in ("done","completed","ok","success","ready","finished")
+            or d.get("done") is True
+            or d.get("ready") is True
+            or d.get("is_ready") is True
+        )
 
     if _is_final(create_json):
         return {"backend_final": create_json, "polling_with": None}
@@ -424,7 +482,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
     if not response_id:
         return {"backend_create": create_json, "polling_with": None}
 
-    fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"
+    fetch_url = f"{BACKEND_BASE_URL}{FETCH_PATH}"""
     deadline = time.time() + BACKEND_TIMEOUT_S
     last: Any = None
 
@@ -544,7 +602,10 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
-    # NOTE: even if qas is empty, we proceed to backend call (as requested)
+    # Save request & QnAs to DB
+    _store_request_and_qna(user, qas)
+
+    # Debug-only: return normalized without backend call
     if str(payload.get("normalize_only", "")).lower() in ("1","true","yes"):
         return jsonify({
             "status": "ok",
@@ -554,6 +615,7 @@ def adapter():
             "correlation_id": g.cid,
         })
 
+    # Build XML and call backend
     xml_body = _xml_superset(user, qas)
     if LOG_XML_ALWAYS:
         logger.info("Built XML cid=%s: %s", g.cid, xml_body)
