@@ -34,23 +34,21 @@ MAX_CONTENT_LENGTH  = int(_getenv("MAX_CONTENT_LENGTH", str(512 * 1024)))
 LOG_LEVEL           = _getenv("LOG_LEVEL", "INFO").upper()
 LOG_XML_ALWAYS      = _getenv("LOG_XML_ALWAYS", "false").lower() == "true"
 
-# behaviour switches
+# Behaviour switches
 REQUIRE_ONLY_USER_FIELDS = _getenv("REQUIRE_ONLY_USER_FIELDS", "true").lower() == "true"
 POSITIONAL_QA_ENABLED    = _getenv("POSITIONAL_QA_ENABLED", "true").lower() == "true"
 REQUIRE_RESULT_KEY       = _getenv("REQUIRE_RESULT_KEY", "true").lower() == "true"
-RESPONSE_MODE            = _getenv("RESPONSE_MODE", "full").lower()   # "full" or "minimal"
-
-# ==================== App ====================
+RESPONSE_HIDE_NORMALIZED = _getenv("RESPONSE_HIDE_NORMALIZED", "false").lower() == "true"  # set true to omit "normalized" from response
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)  # type: ignore
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("adapter")
 
-# ==================== HTTP Session ====================
+# ==================== HTTP Session (retries) ====================
 
 def _session() -> requests.Session:
     s = requests.Session()
@@ -67,6 +65,74 @@ def _session() -> requests.Session:
     return s
 
 HTTP = _session()
+
+# ==================== Database helpers (PROD) ====================
+
+def _get_db_conn():
+    """Hardcoded production connection to Azure PostgreSQL."""
+    return psycopg2.connect(
+        host="projectai-pict-postgresql.postgres.database.azure.com",
+        dbname="projectai-ringsandi-pict",
+        user="postgres",
+        password="Apollo11",
+        port=5432,
+        sslmode="require",
+    )
+
+def _store_request_and_qna(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> None:
+    """
+    Insert one row in `requests` and many rows in `requests_qna`.
+    Tables expected:
+      requests(request_id, name, email, phonenumber, birth_date, timestamp)
+      requests_qna(qna_id, request_id, question, answer, index)
+    """
+    try:
+        conn = _get_db_conn()
+        cur = conn.cursor()
+
+        # Insert into requests (idempotent on request_id)
+        cur.execute(
+            """
+            INSERT INTO requests (request_id, name, email, phonenumber, birth_date, timestamp)
+            VALUES (%s,%s,%s,%s,%s, NOW())
+            ON CONFLICT (request_id) DO NOTHING
+            """,
+            (
+                user.get("result_key", ""),
+                user.get("full_name", ""),
+                user.get("email", ""),
+                user.get("phone_number", ""),
+                user.get("birth_date", ""),
+            ),
+        )
+
+        # Insert Q&As
+        if qas:
+            qna_rows = [
+                (
+                    str(uuid.uuid4()),
+                    user.get("result_key", ""),
+                    qa.get("question_text", ""),
+                    qa.get("answer_text", ""),
+                    idx,
+                )
+                for idx, qa in enumerate(qas)
+            ]
+            execute_values(
+                cur,
+                """
+                INSERT INTO requests_qna (qna_id, request_id, question, answer, index)
+                VALUES %s
+                """,
+                qna_rows,
+            )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("DB saved request=%s qna_count=%d", user.get("result_key", ""), len(qas))
+    except Exception as e:
+        logger.exception("DB insert failed: %s", e)
 
 # ==================== Mapping ====================
 
@@ -119,13 +185,7 @@ def _load_mapping(path: str) -> Optional[Mapping]:
         logger.exception("Failed to load mapping from %s", path)
         return None
 
-# Eager, safe mapping load (MAPPING always defined)
-MAPPING: Optional[Mapping] = None
-try:
-    MAPPING = _load_mapping(MAPPING_PATH)
-except Exception as e:
-    logger.error("Could not load mapping: %s", e)
-    MAPPING = None
+MAPPING = _load_mapping(MAPPING_PATH)
 
 # ==================== Flex Q&A helpers ====================
 
@@ -146,8 +206,12 @@ def _pick_first_truthy(*vals):
     return None
 
 def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Accept multiple UI shapes and return (question_text, answer_text).
+    """
     if not isinstance(item, dict):
         return "", ""
+
     q = _pick_first_truthy(
         item.get("question"),
         item.get("q"),
@@ -157,6 +221,7 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
         item.get("id"),
         item.get("key"),
     )
+
     a = _pick_first_truthy(
         item.get("answer"),
         item.get("value"),
@@ -165,6 +230,7 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
         item.get("choice"),
         item.get("val"),
     )
+
     if a is None:
         sel = _pick_first_truthy(
             (item.get("selectedOption") or {}).get("value") if isinstance(item.get("selectedOption"), dict) else None,
@@ -173,6 +239,7 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
         )
         if sel is not None:
             a = sel
+
     if a is None:
         for key in ("answers", "options", "choices"):
             arr = item.get(key)
@@ -198,11 +265,12 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
                 if picked:
                     a = ", ".join([p for p in picked if p != ""])
                     break
+
     q_text = _flex_str(q)
     a_text = _flex_str(a)
     return q_text, a_text
 
-# ==================== Validation ====================
+# ==================== Helpers ====================
 
 def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
     if not API_KEY_REQUIRED:
@@ -230,6 +298,10 @@ def _require_user_fields(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 def _ensure_list_qas(raw_qas: Any) -> List[Any]:
+    """
+    Accept list or stringified JSON or dict with 'qas'/'items'/'data' OR
+    'answers' (list of strings) OR plain list of strings (answers-only).
+    """
     if isinstance(raw_qas, list):
         return raw_qas
     if isinstance(raw_qas, dict):
@@ -326,70 +398,14 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
     return user, normalized
 
-# ==================== DB helpers ====================
-
-def _get_db_conn():
-    return psycopg2.connect(
-        host="projectai-pict-postgresql.postgres.database.azure.com",
-        dbname="projectai-ringsandi-pict",
-        user="postgres",
-        password="Apollo11",
-        port=5432,
-        sslmode="require",
-    )
-
-def _store_request_and_qna(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> None:
-    conn = None
-    cur = None
-    try:
-        conn = _get_db_conn()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO requests (request_id, name, email, phonenumber, birth_date, timestamp)
-            VALUES (%s,%s,%s,%s,%s,NOW())
-            ON CONFLICT (request_id) DO NOTHING
-        """, (
-            user.get("result_key",""),
-            user.get("full_name",""),
-            user.get("email",""),
-            user.get("phone_number",""),
-            user.get("birth_date",""),
-        ))
-        if qas:
-            qna_rows = [
-                (str(uuid.uuid4()),
-                 user.get("result_key",""),
-                 qa.get("question_text",""),
-                 qa.get("answer_text",""),
-                 idx)
-                for idx, qa in enumerate(qas)
-            ]
-            execute_values(cur, """
-                INSERT INTO requests_qna (qna_id, request_id, question, answer, "index")
-                VALUES %s
-            """, qna_rows)
-        conn.commit()
-        logger.info("DB saved request=%s qna_count=%d", user.get("result_key",""), len(qas))
-    except Exception as e:
-        logger.exception("DB insert failed")
-        # do not raise — keep request flow healthy
-    finally:
-        try:
-            if cur: cur.close()
-        except Exception:
-            pass
-        try:
-            if conn: conn.close()
-        except Exception:
-            pass
-
-# ==================== Backend call ====================
-
+# ---------- XML builder ----------
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     result_key = (user.get("result_key") or user.get("request_id") or str(uuid.uuid4())).strip()
     qa_payload = [
-        {"question": qa.get("question_text", "") or "",
-         "selectedOption": {"value": qa.get("answer_text", "") or ""}}
+        {
+            "question": qa.get("question_text", "") or "",
+            "selectedOption": {"value": qa.get("answer_text", "") or ""}
+        }
         for qa in qas
     ]
     qa_json_str = json.dumps(qa_payload, ensure_ascii=False)
@@ -448,7 +464,8 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
 
     resp = HTTP.post(create_url, data=xml_body.encode("utf-8"), headers=headers, timeout=BACKEND_TIMEOUT_S)
     if resp.status_code >= 400:
-        raise RuntimeError(f"Backend createRequest failed: {resp.status_code} {resp.text}")
+        # Propagate backend create error as a structured object (still 200 to caller, like your previous flow)
+        return {"backend_create": {"status_code": resp.status_code, "detail": resp.text}, "polling_with": None}
 
     create_json: Optional[Dict[str, Any]] = None
     try:
@@ -479,8 +496,12 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
 
     while time.time() < deadline:
         try:
-            r = HTTP.get(fetch_url, params={"response_id": response_id},
-                         headers={"Accept": "application/json, */*"}, timeout=BACKEND_TIMEOUT_S)
+            r = HTTP.get(
+                fetch_url,
+                params={"response_id": response_id},
+                headers={"Accept": "application/json, */*"},
+                timeout=BACKEND_TIMEOUT_S,
+            )
 
             if r.status_code == 202:
                 time.sleep(_get_retry_after(r, None))
@@ -495,12 +516,13 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
                 return {
                     "backend_raw": body_text,
                     "polling_with": "response_id",
-                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
+                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
                 }
 
             if r.status_code >= 400:
                 last = {"status_code": r.status_code, "body": r.text, "params_tried": {"response_id": response_id}}
-                time.sleep(0.7); continue
+                time.sleep(0.7)
+                continue
 
             try:
                 data = r.json()
@@ -508,7 +530,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
                 return {
                     "backend_raw": r.text,
                     "polling_with": "response_id",
-                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
+                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
                 }
 
             last = data
@@ -517,7 +539,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
                 return {
                     "backend_final": data,
                     "polling_with": "response_id",
-                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
+                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
                 }
 
             time.sleep(_get_retry_after(r, data))
@@ -530,19 +552,14 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
         "backend_fetch_timeout": True,
         "last": last,
         "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
-        "polling_with": "response_id"
+        "polling_with": "response_id",
     }
 
-# ==================== JSON error handler ====================
-
-@app.errorhandler(Exception)
-def _err(e):
-    logger.exception("Unhandled exception")
-    return jsonify({
-        "status": "error",
-        "error": {"code": "internal_error", "message": str(e)},
-        "correlation_id": g.get("cid"),
-    }), 500
+def _json_error(status: int, code: str, message: str, details: Optional[Dict[str, Any]] = None):
+    payload = {"status": "error", "error": {"code": code, "message": message}, "correlation_id": g.get("cid")}
+    if details:
+        payload["details"] = details
+    return jsonify(payload), status
 
 # ==================== Hooks ====================
 
@@ -552,18 +569,7 @@ def _before():
     if request.endpoint == "adapter":
         ctype = (request.content_type or "").lower()
         if "application/json" not in ctype:
-            return jsonify({
-                "status":"error",
-                "error":{"code":"unsupported_media_type","message":"Content-Type must be application/json"},
-                "correlation_id": g.get("cid")
-            }), 415
-
-@app.before_first_request
-def _check_mapping():
-    if MAPPING is None:
-        logger.warning("⚠️ No mapping loaded at startup from %s", MAPPING_PATH)
-    else:
-        logger.info("✅ Mapping loaded with %d questions", len(MAPPING.questions))
+            return _json_error(415, "unsupported_media_type", "Content-Type must be application/json")
 
 @app.after_request
 def _after(resp):
@@ -572,7 +578,14 @@ def _after(resp):
     resp.headers["X-Frame-Options"] = "DENY"
     return resp
 
-# ==================== Diagnostics ====================
+# Run one-time startup checks (Flask 3.x compatible replacement for before_first_request)
+with app.app_context():
+    if MAPPING is None:
+        logger.warning("⚠️ No mapping loaded at startup from %s", MAPPING_PATH)
+    else:
+        logger.info("✅ Mapping loaded with %d questions", len(MAPPING.questions))
+
+# ==================== Routes ====================
 
 @app.get("/health")
 def health():
@@ -581,53 +594,24 @@ def health():
 @app.get("/ready")
 def ready():
     if MAPPING is None:
-        return jsonify({"status":"error","error":{"code":"not_ready","message":"Mapping not loaded"}}), 503
+        return _json_error(503, "not_ready", "Mapping not loaded")
     return jsonify({"status": "ok"})
-
-@app.get("/dbcheck")
-def dbcheck():
-    try:
-        conn = _get_db_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT 1")
-        cur.fetchone()
-        cur.close(); conn.close()
-        return jsonify({"status":"ok","db":"connected"})
-    except Exception as e:
-        logger.exception("DB check failed")
-        return jsonify({"status":"error","db":"failed","details":str(e)}), 500
-
-@app.get("/mapping")
-def mapping_info():
-    return jsonify({
-        "loaded": MAPPING is not None,
-        "questions_count": len(MAPPING.questions) if MAPPING else 0,
-        "must_have": getattr(MAPPING, "must_have_keys", []),
-        "allow_unknown": getattr(MAPPING, "allow_unknown", False),
-        "path": MAPPING_PATH,
-    })
-
-# ==================== Main Route ====================
 
 @app.post("/adapter")
 def adapter():
     if API_KEY_REQUIRED:
         err = _require_api_key(request.headers)
         if err:
-            return jsonify({"status":"error","error":{"code":"unauthorized","message":err},
-                            "correlation_id":g.cid}), 401
+            return _json_error(401, "unauthorized", err)
     if MAPPING is None:
-        return jsonify({"status":"error","error":{"code":"not_ready","message":"Mapping not loaded"},
-                        "correlation_id":g.cid}), 503
+        return _json_error(503, "not_ready", "Mapping not loaded")
 
     try:
         payload = request.get_json(force=True, silent=False)
         if not isinstance(payload, dict):
-            return jsonify({"status":"error","error":{"code":"bad_request","message":"Body must be a JSON object"},
-                            "correlation_id":g.cid}), 400
+            return _json_error(400, "bad_request", "Body must be a JSON object")
     except Exception as e:
-        return jsonify({"status":"error","error":{"code":"bad_json","message":f"Invalid JSON: {e}"},
-                        "correlation_id":g.cid}), 400
+        return _json_error(400, "bad_json", f"Invalid JSON: {e}")
 
     try:
         user, qas = _validate(payload, MAPPING)
@@ -635,21 +619,25 @@ def adapter():
         try:
             return jsonify({"status": "error", "error": json.loads(str(ve)), "correlation_id": g.cid}), 400
         except Exception:
-            return jsonify({"status":"error","error":{"code":"validation_error","message":str(ve)},
-                            "correlation_id":g.cid}), 400
+            return _json_error(400, "validation_error", str(ve))
 
-    # Persist
+    # Save to DB (requests + requests_qna)
     _store_request_and_qna(user, qas)
 
-    # Debug normalize only
-    if str(payload.get("normalize_only","")).lower() in ("1","true","yes"):
-        return jsonify({
+    # Debug-only: return normalized without calling backend
+    if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
+        body = {
             "status": "ok",
             "request_id": user["request_id"],
             "result_key": user["result_key"],
-            "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
             "correlation_id": g.cid,
-        })
+        }
+        if not RESPONSE_HIDE_NORMALIZED:
+            body["normalized"] = [
+                {"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]}
+                for qa in qas
+            ]
+        return jsonify(body)
 
     xml_body = _xml_superset(user, qas)
     if LOG_XML_ALWAYS:
@@ -659,37 +647,32 @@ def adapter():
         backend_result = _call_backend(xml_body, g.cid, user)
     except Exception as e:
         logger.exception("Backend call failed cid=%s", g.cid)
-        return jsonify({"status":"error","error":{"code":"backend_error","message":str(e)},
-                        "correlation_id":g.cid}), 502
+        body = {"details": str(e), "xml": xml_body} if LOG_XML_ALWAYS else {"details": str(e)}
+        return _json_error(502, "backend_error", "Upstream backend call failed", body)
 
-    # Response shaping
-    req_mode = (request.headers.get("x-response-mode") or request.args.get("mode") or RESPONSE_MODE).lower()
-    if req_mode == "minimal":
-        be = backend_result or {}
-        payload_out = None
-        if isinstance(be.get("backend_final"), dict):
-            payload_out = be["backend_final"].get("data", be["backend_final"])
-        if payload_out is None and isinstance(be.get("backend_create"), dict):
-            payload_out = be["backend_create"]
-        if payload_out is None:
-            payload_out = be.get("backend_raw")
-
-        out = {"status": "ok", "result_key": user.get("result_key","")}
-        if user.get("request_id"): out["request_id"] = user["request_id"]
-        if payload_out is not None: out["data"] = payload_out
-        return jsonify(out)
-
-    # full
-    return jsonify({
+    result_payload = {
         "status": "ok",
         "request_id": user["request_id"],
         "result_key": user["result_key"],
-        "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
         "backend": backend_result,
         "correlation_id": g.cid,
-    })
+    }
+    if not RESPONSE_HIDE_NORMALIZED:
+        result_payload["normalized"] = [
+            {"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]}
+            for qa in qas
+        ]
 
-# ==================== Entrypoint ====================
+    if isinstance(result_payload.get("backend"), dict):
+        bt = result_payload["backend"]
+        if isinstance(bt.get("fetch_target"), dict):
+            bt["fetch_target"]["id_hint"] = "response_id"
+        if "polling_with" in bt:
+            bt["polling_with"] = "response_id" if bt.get("polling_with") else None
+
+    return jsonify(result_payload)
+
+# ==================== Main ====================
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
