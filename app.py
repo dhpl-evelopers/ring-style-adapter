@@ -110,12 +110,12 @@ def _store_request_and_qna(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> N
     except Exception as e:
         logger.exception("DB insert failed: %s", e)
 
-# ==================== Mapping / Validation (unchanged) ====================
-# ... keep your Mapping class, _load_mapping, _flex_str, _pick_first_truthy,
-# _extract_question_and_answer, _require_user_fields, _ensure_list_qas, _validate etc.
+# ==================== Mapping / Validation (shortened for clarity) ====================
+# Keep your existing Mapping, _load_mapping, _extract_question_and_answer, _validate etc.
+# ---------------------- (not repeated here, unchanged from your last version) ----------------------
 
-# ==================== Backend Call (unchanged) ====================
-# ... keep _xml_superset, _get_retry_after, _extract_response_id, _call_backend
+# ==================== Backend Call ====================
+# Keep your _xml_superset, _get_retry_after, _extract_response_id, _call_backend etc.
 
 # ==================== Routes ====================
 
@@ -166,12 +166,21 @@ def adapter():
         return _json_error(502,"backend_error","Upstream backend call failed",body)
 
     # -------- Response shaping --------
-    if RESPONSE_MODE=="minimal":
+    req_mode = (request.headers.get("x-response-mode") or request.args.get("mode") or RESPONSE_MODE).lower()
+
+    if req_mode=="minimal":
         be=backend_result or {}
-        best=be.get("backend_final") or be.get("backend_create") or be.get("backend_raw")
+        payload=None
+        if isinstance(be.get("backend_final"),dict):
+            payload=be["backend_final"].get("data",be["backend_final"])
+        if payload is None and isinstance(be.get("backend_create"),dict):
+            payload=be["backend_create"]
+        if payload is None:
+            payload=be.get("backend_raw")
+
         out={"status":"ok","result_key":user.get("result_key","")}
         if user.get("request_id"): out["request_id"]=user["request_id"]
-        if best is not None: out["data"]=best
+        if payload is not None: out["data"]=payload
         return jsonify(out)
 
     # default full
