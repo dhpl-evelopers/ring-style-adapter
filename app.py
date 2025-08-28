@@ -12,10 +12,6 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from xml.etree.ElementTree import Element, SubElement, tostring
 
-# DB
-import psycopg2
-from psycopg2.extras import execute_values
-
 # ==================== Config ====================
 
 def _getenv(name: str, default: Optional[str] = None, required: bool = False) -> str:
@@ -34,11 +30,11 @@ MAX_CONTENT_LENGTH  = int(_getenv("MAX_CONTENT_LENGTH", str(512 * 1024)))
 LOG_LEVEL           = _getenv("LOG_LEVEL", "INFO").upper()
 LOG_XML_ALWAYS      = _getenv("LOG_XML_ALWAYS", "false").lower() == "true"
 
-# Behaviour switches
+# —— NEW: behaviour switches ——————————————————————————
 REQUIRE_ONLY_USER_FIELDS = _getenv("REQUIRE_ONLY_USER_FIELDS", "true").lower() == "true"
 POSITIONAL_QA_ENABLED    = _getenv("POSITIONAL_QA_ENABLED", "true").lower() == "true"
 REQUIRE_RESULT_KEY       = _getenv("REQUIRE_RESULT_KEY", "true").lower() == "true"
-RESPONSE_HIDE_NORMALIZED = _getenv("RESPONSE_HIDE_NORMALIZED", "false").lower() == "true"  # set true to omit "normalized" from response
+# ————————————————————————————————————————————————————
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -65,74 +61,6 @@ def _session() -> requests.Session:
     return s
 
 HTTP = _session()
-
-# ==================== Database helpers (PROD) ====================
-
-def _get_db_conn():
-    """Hardcoded production connection to Azure PostgreSQL."""
-    return psycopg2.connect(
-        host="projectai-pict-postgresql.postgres.database.azure.com",
-        dbname="projectai-ringsandi-pict",
-        user="postgres",
-        password="Apollo11",
-        port=5432,
-        sslmode="require",
-    )
-
-def _store_request_and_qna(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> None:
-    """
-    Insert one row in `requests` and many rows in `requests_qna`.
-    Tables expected:
-      requests(request_id, name, email, phonenumber, birth_date, timestamp)
-      requests_qna(qna_id, request_id, question, answer, index)
-    """
-    try:
-        conn = _get_db_conn()
-        cur = conn.cursor()
-
-        # Insert into requests (idempotent on request_id)
-        cur.execute(
-            """
-            INSERT INTO requests (request_id, name, email, phonenumber, birth_date, timestamp)
-            VALUES (%s,%s,%s,%s,%s, NOW())
-            ON CONFLICT (request_id) DO NOTHING
-            """,
-            (
-                user.get("result_key", ""),
-                user.get("full_name", ""),
-                user.get("email", ""),
-                user.get("phone_number", ""),
-                user.get("birth_date", ""),
-            ),
-        )
-
-        # Insert Q&As
-        if qas:
-            qna_rows = [
-                (
-                    str(uuid.uuid4()),
-                    user.get("result_key", ""),
-                    qa.get("question_text", ""),
-                    qa.get("answer_text", ""),
-                    idx,
-                )
-                for idx, qa in enumerate(qas)
-            ]
-            execute_values(
-                cur,
-                """
-                INSERT INTO requests_qna (qna_id, request_id, question, answer, index)
-                VALUES %s
-                """,
-                qna_rows,
-            )
-
-        conn.commit()
-        cur.close()
-        conn.close()
-        logger.info("DB saved request=%s qna_count=%d", user.get("result_key", ""), len(qas))
-    except Exception as e:
-        logger.exception("DB insert failed: %s", e)
 
 # ==================== Mapping ====================
 
@@ -280,6 +208,7 @@ def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
         return "Missing API key header 'x-api-key'."
     return None
 
+# —— NEW: only-user-fields enforcement ————————————————
 def _require_user_fields(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     missing = []
     if not (user.get("full_name") or "").strip():
@@ -296,6 +225,7 @@ def _require_user_fields(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if missing:
         return {"error": "Mandatory user fields missing", "missing": missing}
     return None
+# ————————————————————————————————————————————————
 
 def _ensure_list_qas(raw_qas: Any) -> List[Any]:
     """
@@ -336,6 +266,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         "test_mode":    payload.get("test_mode") or "live",
     }
 
+    # NEW: only user fields mandatory
     uf_err = _require_user_fields(user)
     if uf_err:
         raise ValueError(json.dumps(uf_err))
@@ -348,6 +279,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     normalized: List[Dict[str, Any]] = []
     seen = set()
 
+    # flexible extraction for dict-like entries
     answers_only_buffer: List[str] = []
     for item in raw_qas:
         if isinstance(item, str):
@@ -370,6 +302,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
             })
             seen.add(q_key)
 
+    # NEW: positional mapping for answers-only shapes
     if POSITIONAL_QA_ENABLED and answers_only_buffer:
         order_keys = mapping.must_have_keys[:] if mapping.must_have_keys else list(mapping.questions.keys())
         for idx, ans in enumerate(answers_only_buffer):
@@ -384,11 +317,13 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
             })
             seen.add(q_key)
 
+    # Conditional example: enforce relation only if that key exists
     purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
     if purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
         if "q1b_relation" in mapping.questions:
             raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
 
+    # If we explicitly want to also enforce mapping.must_have_keys, toggle via env
     if not REQUIRE_ONLY_USER_FIELDS:
         missing = [k for k in mapping.must_have_keys if k not in seen]
         if missing:
@@ -464,8 +399,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
 
     resp = HTTP.post(create_url, data=xml_body.encode("utf-8"), headers=headers, timeout=BACKEND_TIMEOUT_S)
     if resp.status_code >= 400:
-        # Propagate backend create error as a structured object (still 200 to caller, like your previous flow)
-        return {"backend_create": {"status_code": resp.status_code, "detail": resp.text}, "polling_with": None}
+        raise RuntimeError(f"Backend createRequest failed: {resp.status_code} {resp.text}")
 
     create_json: Optional[Dict[str, Any]] = None
     try:
@@ -496,12 +430,8 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
 
     while time.time() < deadline:
         try:
-            r = HTTP.get(
-                fetch_url,
-                params={"response_id": response_id},
-                headers={"Accept": "application/json, */*"},
-                timeout=BACKEND_TIMEOUT_S,
-            )
+            r = HTTP.get(fetch_url, params={"response_id": response_id},
+                         headers={"Accept": "application/json, */*"}, timeout=BACKEND_TIMEOUT_S)
 
             if r.status_code == 202:
                 time.sleep(_get_retry_after(r, None))
@@ -516,7 +446,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
                 return {
                     "backend_raw": body_text,
                     "polling_with": "response_id",
-                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
+                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
                 }
 
             if r.status_code >= 400:
@@ -530,7 +460,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
                 return {
                     "backend_raw": r.text,
                     "polling_with": "response_id",
-                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
+                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
                 }
 
             last = data
@@ -539,7 +469,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
                 return {
                     "backend_final": data,
                     "polling_with": "response_id",
-                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
+                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
                 }
 
             time.sleep(_get_retry_after(r, data))
@@ -552,7 +482,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
         "backend_fetch_timeout": True,
         "last": last,
         "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
-        "polling_with": "response_id",
+        "polling_with": "response_id"
     }
 
 def _json_error(status: int, code: str, message: str, details: Optional[Dict[str, Any]] = None):
@@ -577,13 +507,6 @@ def _after(resp):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
     return resp
-
-# Run one-time startup checks (Flask 3.x compatible replacement for before_first_request)
-with app.app_context():
-    if MAPPING is None:
-        logger.warning("⚠️ No mapping loaded at startup from %s", MAPPING_PATH)
-    else:
-        logger.info("✅ Mapping loaded with %d questions", len(MAPPING.questions))
 
 # ==================== Routes ====================
 
@@ -621,23 +544,15 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
-    # Save to DB (requests + requests_qna)
-    _store_request_and_qna(user, qas)
-
-    # Debug-only: return normalized without calling backend
-    if str(payload.get("normalize_only", "")).lower() in ("1", "true", "yes"):
-        body = {
+    # NOTE: even if qas is empty, we proceed to backend call (as requested)
+    if str(payload.get("normalize_only", "")).lower() in ("1","true","yes"):
+        return jsonify({
             "status": "ok",
             "request_id": user["request_id"],
             "result_key": user["result_key"],
+            "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
             "correlation_id": g.cid,
-        }
-        if not RESPONSE_HIDE_NORMALIZED:
-            body["normalized"] = [
-                {"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]}
-                for qa in qas
-            ]
-        return jsonify(body)
+        })
 
     xml_body = _xml_superset(user, qas)
     if LOG_XML_ALWAYS:
@@ -654,14 +569,10 @@ def adapter():
         "status": "ok",
         "request_id": user["request_id"],
         "result_key": user["result_key"],
+        "normalized": [{"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]} for qa in qas],
         "backend": backend_result,
         "correlation_id": g.cid,
     }
-    if not RESPONSE_HIDE_NORMALIZED:
-        result_payload["normalized"] = [
-            {"key": qa["key"], "question": qa["question_text"], "answer": qa["answer_text"]}
-            for qa in qas
-        ]
 
     if isinstance(result_payload.get("backend"), dict):
         bt = result_payload["backend"]
