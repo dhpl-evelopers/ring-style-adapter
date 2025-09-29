@@ -20,28 +20,31 @@ def _getenv(name: str, default: Optional[str] = None, required: bool = False) ->
         raise RuntimeError(f"Missing required env var: {name}")
     return (v or "").strip()
 
-# --- Backend + adapter settings
+# Backend endpoints
 BACKEND_BASE_URL    = _getenv("BACKEND_BASE_URL", required=True).rstrip("/")
 CREATE_PATH         = _getenv("BACKEND_CREATE_PATH", "/createRequest")
 FETCH_PATH          = _getenv("BACKEND_FETCH_PATH", "/fetchResponse")
 BACKEND_TIMEOUT_S   = int(_getenv("BACKEND_TIMEOUT_SEC", "25"))
 
-# --- Mapping config
+# Mapping config
 MAPPING_PATH        = _getenv("MAPPING_PATH", "/home/site/wwwroot/mapping.config.json")
 
-# --- Housekeeping
+# Behaviour flags
 API_KEY_REQUIRED    = _getenv("API_KEY_REQUIRED", "false").lower() == "true"
 MAX_CONTENT_LENGTH  = int(_getenv("MAX_CONTENT_LENGTH", str(512 * 1024)))
 LOG_LEVEL           = _getenv("LOG_LEVEL", "INFO").upper()
 LOG_XML_ALWAYS      = _getenv("LOG_XML_ALWAYS", "false").lower() == "true"
 
-# --- Validation switches
 REQUIRE_ONLY_USER_FIELDS = _getenv("REQUIRE_ONLY_USER_FIELDS", "true").lower() == "true"
 POSITIONAL_QA_ENABLED    = _getenv("POSITIONAL_QA_ENABLED", "true").lower() == "true"
-REQUIRE_RESULT_KEY       = _getenv("REQUIRE_RESULT_KEY", "true").lower() == "true"
+REQUIRE_RESULT_KEY       = _getenv("REQUIRE_RESULT_KEY", "false").lower() == "true"  # let Postman generate or leave blank
 
-# --- NEW: how to emit Q&A for the backend parser: json | pairs | kv
-BACKEND_QA_MODE     = _getenv("BACKEND_QA_MODE", "json").lower()
+# IMPORTANT: XML emission mode for Q&A (choose the one your backend parses)
+#   json   -> keep legacy JSON blob only
+#   pairs  -> <Qnas><Item><Question>..</Question><Answer>..</Answer></Item>..</Qnas>
+#   pairs2 -> <QuestionAnswersPairs><QA><QuestionText>..</QuestionText><AnswerText>..</AnswerText></QA>..</QuestionAnswersPairs>
+#   kv     -> <Answers><Q key="q_key">answer</Q>..</Answers>
+BACKEND_QA_MODE     = _getenv("BACKEND_QA_MODE", "pairs").lower()
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -122,7 +125,7 @@ def _load_mapping(path: str) -> Optional[Mapping]:
 
 MAPPING = _load_mapping(MAPPING_PATH)
 
-# ==================== Flex Q&A helpers ====================
+# ==================== Flex Q&A ====================
 
 def _flex_str(x: Any) -> str:
     if x is None:
@@ -141,31 +144,16 @@ def _pick_first_truthy(*vals):
     return None
 
 def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
-    """
-    Accept multiple UI shapes and return (question_text, answer_text).
-    """
     if not isinstance(item, dict):
         return "", ""
-
     q = _pick_first_truthy(
-        item.get("question"),
-        item.get("q"),
-        item.get("label"),
-        item.get("title"),
-        item.get("text"),
-        item.get("id"),
-        item.get("key"),
+        item.get("question"), item.get("q"), item.get("label"),
+        item.get("title"), item.get("text"), item.get("id"), item.get("key")
     )
-
     a = _pick_first_truthy(
-        item.get("answer"),
-        item.get("value"),
-        item.get("option"),
-        item.get("selected"),
-        item.get("choice"),
-        item.get("val"),
+        item.get("answer"), item.get("value"), item.get("option"),
+        item.get("selected"), item.get("choice"), item.get("val"),
     )
-
     if a is None:
         sel = _pick_first_truthy(
             (item.get("selectedOption") or {}).get("value") if isinstance(item.get("selectedOption"), dict) else None,
@@ -174,7 +162,6 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
         )
         if sel is not None:
             a = sel
-
     if a is None:
         for key in ("answers", "options", "choices"):
             arr = item.get(key)
@@ -200,12 +187,9 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
                 if picked:
                     a = ", ".join([p for p in picked if p != ""])
                     break
+    return _flex_str(q), _flex_str(a)
 
-    q_text = _flex_str(q)
-    a_text = _flex_str(a)
-    return q_text, a_text
-
-# ==================== Validation helpers ====================
+# ==================== Validation ====================
 
 def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
     if not API_KEY_REQUIRED:
@@ -233,10 +217,6 @@ def _require_user_fields(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 def _ensure_list_qas(raw_qas: Any) -> List[Any]:
-    """
-    Accept list or stringified JSON or dict with 'qas'/'items'/'data' OR
-    'answers' (list of strings) OR plain list of strings (answers-only).
-    """
     if isinstance(raw_qas, list):
         return raw_qas
     if isinstance(raw_qas, dict):
@@ -267,7 +247,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         "phone_number": payload.get("phone_number") or payload.get("contact") or "",
         "birth_date":   payload.get("birth_date") or payload.get("dob") or payload.get("date") or "",
         "request_id":   payload.get("request_id") or payload.get("id") or "",
-        "result_key":   payload.get("result_key") or "",
+        "result_key":   payload.get("result_key") or "",   # can be blank; backend will receive a generated UUID in XML
         "test_mode":    payload.get("test_mode") or "live",
     }
 
@@ -275,15 +255,14 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     if uf_err:
         raise ValueError(json.dumps(uf_err))
 
-    raw_qas_input = payload.get("questionAnswers") or payload.get("question_answers") or []
-    raw_qas = _ensure_list_qas(raw_qas_input)
+    raw_qas = _ensure_list_qas(payload.get("questionAnswers") or payload.get("question_answers") or [])
     if not isinstance(raw_qas, list):
         raise ValueError(json.dumps({"error": "questionAnswers must be a list or JSON string"}))
 
     normalized: List[Dict[str, Any]] = []
     seen = set()
-
     answers_only_buffer: List[str] = []
+
     for item in raw_qas:
         if isinstance(item, str):
             answers_only_buffer.append(item)
@@ -292,59 +271,54 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         if not q_text_in and isinstance(item, dict):
             q_text_in = _flex_str(item.get("question") or item.get("id") or item.get("key") or "")
         if q_text_in:
-            q_key = mapping.resolve_q_key(q_text_in)
+            q_key = MAPPING.resolve_q_key(q_text_in) if MAPPING else None
             if not q_key:
-                if mapping.allow_unknown:
+                if MAPPING and MAPPING.allow_unknown:
                     continue
                 raise ValueError(json.dumps({"error": "Unknown question", "question_received": q_text_in}))
-            meta = mapping.questions[q_key]
+            meta = MAPPING.questions[q_key]
             normalized.append({
                 "key": q_key,
                 "question_text": meta.get("canonical_label") or q_key,
-                "answer_text": mapping.normalize_answer(q_key, a_text_in),
+                "answer_text": MAPPING.normalize_answer(q_key, a_text_in) if MAPPING else a_text_in,
             })
             seen.add(q_key)
 
-    if POSITIONAL_QA_ENABLED and answers_only_buffer:
-        order_keys = mapping.must_have_keys[:] if mapping.must_have_keys else list(mapping.questions.keys())
+    if POSITIONAL_QA_ENABLED and answers_only_buffer and MAPPING:
+        order_keys = MAPPING.must_have_keys[:] if MAPPING.must_have_keys else list(MAPPING.questions.keys())
         for idx, ans in enumerate(answers_only_buffer):
             if idx >= len(order_keys):
                 break
             q_key = order_keys[idx]
-            meta = mapping.questions.get(q_key, {"canonical_label": q_key})
-            normalized.append({
-                "key": q_key,
-                "question_text": meta.get("canonical_label") or q_key,
-                "answer_text": _flex_str(ans)
-            })
+            meta = MAPPING.questions.get(q_key, {"canonical_label": q_key})
+            normalized.append({"key": q_key, "question_text": meta.get("canonical_label") or q_key, "answer_text": _flex_str(ans)})
             seen.add(q_key)
 
-    # Conditional example: if purchasing for Others → relation becomes mandatory
+    # Conditional: if "Others" then relation is required (only if present in mapping)
     purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
-    if purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
-        if "q1b_relation" in mapping.questions:
+    if MAPPING and purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
+        if "q1b_relation" in MAPPING.questions:
             raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
 
-    if not REQUIRE_ONLY_USER_FIELDS:
-        missing = [k for k in mapping.must_have_keys if k not in seen]
+    if MAPPING and not REQUIRE_ONLY_USER_FIELDS:
+        missing = [k for k in MAPPING.must_have_keys if k not in seen]
         if missing:
             raise ValueError(json.dumps({"error": "Mandatory questions missing", "missing_keys": missing}))
 
-    order = {k: i for i, k in enumerate(mapping.must_have_keys)} if mapping.must_have_keys else {}
+    order = {k: i for i, k in enumerate(MAPPING.must_have_keys)} if (MAPPING and MAPPING.must_have_keys) else {}
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
     return user, normalized
 
 # ==================== XML builder ====================
 
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
+    # Prefer supplied result_key; otherwise generate one
     result_key = (user.get("result_key") or user.get("request_id") or str(uuid.uuid4())).strip()
 
-    # Always include JSON array for compatibility
+    # Always include JSON array (compatibility)
     qa_payload = [
-        {
-            "question": qa.get("question_text", "") or qa.get("key", ""),
-            "selectedOption": {"value": qa.get("answer_text", "") or ""}
-        }
+        {"question": qa.get("question_text", "") or qa.get("key", ""),
+         "selectedOption": {"value": qa.get("answer_text", "") or ""}}
         for qa in qas
     ]
     qa_json_str = json.dumps(qa_payload, ensure_ascii=False)
@@ -357,20 +331,33 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     SubElement(req, "date").text         = user.get("birth_date", "") or user.get("dob", "") or user.get("date", "") or ""
     SubElement(req, "questionAnswers").text = qa_json_str
 
-    # Extra shapes many backends parse
     mode = BACKEND_QA_MODE
+
     if mode == "pairs":
+        # <Qnas><Item><Question>..</Question><Answer>..</Answer></Item>...</Qnas>
         qnas = SubElement(req, "Qnas")
         for qa in qas:
             it = SubElement(qnas, "Item")
             SubElement(it, "Question").text = qa.get("question_text", "") or qa.get("key", "")
             SubElement(it, "Answer").text   = qa.get("answer_text", "") or ""
+
+    elif mode == "pairs2":
+        # <QuestionAnswersPairs><QA><QuestionText>..</QuestionText><AnswerText>..</AnswerText></QA>...</QuestionAnswersPairs>
+        pairs = SubElement(req, "QuestionAnswersPairs")
+        for qa in qas:
+            node = SubElement(pairs, "QA")
+            SubElement(node, "QuestionText").text = qa.get("question_text", "") or qa.get("key", "")
+            SubElement(node, "AnswerText").text   = qa.get("answer_text", "") or ""
+
     elif mode == "kv":
+        # <Answers><Q key="q_key">answer</Q>...</Answers>
         ans = SubElement(req, "Answers")
         for qa in qas:
             q = SubElement(ans, "Q")
             q.set("key", qa.get("key", ""))
             q.text = qa.get("answer_text", "") or ""
+
+    # mode == "json" adds nothing extra beyond the JSON blob
 
     return tostring(req, encoding="unicode")
 
@@ -415,7 +402,7 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
     create_url = f"{BACKEND_BASE_URL}{CREATE_PATH}"
     headers = {"Content-Type": "application/xml", "Accept": "application/json, */*"}
     if LOG_XML_ALWAYS:
-        logger.info("XML cid=%s payload=%s", cid, xml_body)
+        logger.info("POST %s cid=%s XML=%s", create_url, cid, xml_body)
 
     resp = HTTP.post(create_url, data=xml_body.encode("utf-8"), headers=headers, timeout=BACKEND_TIMEOUT_S)
     if resp.status_code >= 400:
@@ -528,6 +515,15 @@ def ready():
         return _json_error(503, "not_ready", "Mapping not loaded")
     return jsonify({"status": "ok"})
 
+@app.get("/diag")
+def diag():
+    return jsonify({
+        "qa_mode": BACKEND_QA_MODE,
+        "mapping_loaded": MAPPING is not None,
+        "require_only_user_fields": REQUIRE_ONLY_USER_FIELDS,
+        "positional_enabled": POSITIONAL_QA_ENABLED
+    })
+
 @app.post("/adapter")
 def adapter():
     if API_KEY_REQUIRED:
@@ -552,7 +548,7 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
-    # Normalization-only shortcut
+    # Shortcut: allow normalization-only (no backend call)
     if str(payload.get("normalize_only", "")).lower() in ("1","true","yes"):
         return jsonify({
             "status": "ok",
@@ -582,7 +578,6 @@ def adapter():
         "correlation_id": g.cid,
     }
 
-    # Small cleanups for UI
     if isinstance(result_payload.get("backend"), dict):
         bt = result_payload["backend"]
         if isinstance(bt.get("fetch_target"), dict):
