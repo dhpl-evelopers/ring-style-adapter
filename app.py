@@ -20,20 +20,28 @@ def _getenv(name: str, default: Optional[str] = None, required: bool = False) ->
         raise RuntimeError(f"Missing required env var: {name}")
     return (v or "").strip()
 
+# --- Backend + adapter settings
 BACKEND_BASE_URL    = _getenv("BACKEND_BASE_URL", required=True).rstrip("/")
 CREATE_PATH         = _getenv("BACKEND_CREATE_PATH", "/createRequest")
 FETCH_PATH          = _getenv("BACKEND_FETCH_PATH", "/fetchResponse")
 BACKEND_TIMEOUT_S   = int(_getenv("BACKEND_TIMEOUT_SEC", "25"))
+
+# --- Mapping config
 MAPPING_PATH        = _getenv("MAPPING_PATH", "/home/site/wwwroot/mapping.config.json")
+
+# --- Housekeeping
 API_KEY_REQUIRED    = _getenv("API_KEY_REQUIRED", "false").lower() == "true"
 MAX_CONTENT_LENGTH  = int(_getenv("MAX_CONTENT_LENGTH", str(512 * 1024)))
 LOG_LEVEL           = _getenv("LOG_LEVEL", "INFO").upper()
 LOG_XML_ALWAYS      = _getenv("LOG_XML_ALWAYS", "false").lower() == "true"
 
-# behavior switches
+# --- Validation switches
 REQUIRE_ONLY_USER_FIELDS = _getenv("REQUIRE_ONLY_USER_FIELDS", "true").lower() == "true"
 POSITIONAL_QA_ENABLED    = _getenv("POSITIONAL_QA_ENABLED", "true").lower() == "true"
 REQUIRE_RESULT_KEY       = _getenv("REQUIRE_RESULT_KEY", "true").lower() == "true"
+
+# --- NEW: how to emit Q&A for the backend parser: json | pairs | kv
+BACKEND_QA_MODE     = _getenv("BACKEND_QA_MODE", "json").lower()
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -197,7 +205,7 @@ def _extract_question_and_answer(item: Dict[str, Any]) -> Tuple[str, str]:
     a_text = _flex_str(a)
     return q_text, a_text
 
-# ==================== Helpers ====================
+# ==================== Validation helpers ====================
 
 def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
     if not API_KEY_REQUIRED:
@@ -311,6 +319,7 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
             })
             seen.add(q_key)
 
+    # Conditional example: if purchasing for Others → relation becomes mandatory
     purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
     if purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
         if "q1b_relation" in mapping.questions:
@@ -325,12 +334,15 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     normalized.sort(key=lambda x: order.get(x["key"], 9999))
     return user, normalized
 
-# ---------- XML builder ----------
+# ==================== XML builder ====================
+
 def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     result_key = (user.get("result_key") or user.get("request_id") or str(uuid.uuid4())).strip()
+
+    # Always include JSON array for compatibility
     qa_payload = [
         {
-            "question": qa.get("question_text", "") or "",
+            "question": qa.get("question_text", "") or qa.get("key", ""),
             "selectedOption": {"value": qa.get("answer_text", "") or ""}
         }
         for qa in qas
@@ -344,7 +356,25 @@ def _xml_superset(user: Dict[str, Any], qas: List[Dict[str, Any]]) -> str:
     SubElement(req, "result_key").text   = result_key
     SubElement(req, "date").text         = user.get("birth_date", "") or user.get("dob", "") or user.get("date", "") or ""
     SubElement(req, "questionAnswers").text = qa_json_str
+
+    # Extra shapes many backends parse
+    mode = BACKEND_QA_MODE
+    if mode == "pairs":
+        qnas = SubElement(req, "Qnas")
+        for qa in qas:
+            it = SubElement(qnas, "Item")
+            SubElement(it, "Question").text = qa.get("question_text", "") or qa.get("key", "")
+            SubElement(it, "Answer").text   = qa.get("answer_text", "") or ""
+    elif mode == "kv":
+        ans = SubElement(req, "Answers")
+        for qa in qas:
+            q = SubElement(ans, "Q")
+            q.set("key", qa.get("key", ""))
+            q.text = qa.get("answer_text", "") or ""
+
     return tostring(req, encoding="unicode")
+
+# ==================== Backend round-trip ====================
 
 def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]]) -> float:
     ra = resp.headers.get("Retry-After")
@@ -372,8 +402,7 @@ def _get_retry_after(resp: requests.Response, body_json: Optional[Dict[str, Any]
 
 def _extract_response_id(create_json: Optional[Dict[str, Any]], headers: Dict[str, Any]) -> Optional[str]:
     if create_json:
-        id_keys = ["response_id","ResponseId","responseId","id","Id","code","Code","requestId","request_id"]
-        for k in id_keys:
+        for k in ["response_id","ResponseId","responseId","id","Id","code","Code","requestId","request_id"]:
             val = create_json.get(k)
             if val and str(val).strip():
                 return str(val).strip()
@@ -385,7 +414,6 @@ def _extract_response_id(create_json: Optional[Dict[str, Any]], headers: Dict[st
 def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, Any]:
     create_url = f"{BACKEND_BASE_URL}{CREATE_PATH}"
     headers = {"Content-Type": "application/xml", "Accept": "application/json, */*"}
-    logger.info("POST %s cid=%s", create_url, cid)
     if LOG_XML_ALWAYS:
         logger.info("XML cid=%s payload=%s", cid, xml_body)
 
@@ -435,47 +463,33 @@ def _call_backend(xml_body: str, cid: str, user: Dict[str, Any]) -> Dict[str, An
                 if not body_text or "list index out of range" in body_text.lower():
                     time.sleep(0.7)
                     continue
-                return {
-                    "backend_raw": body_text,
-                    "polling_with": "response_id",
-                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
-                }
+                return {"backend_raw": body_text, "polling_with": "response_id",
+                        "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}}
 
             if r.status_code >= 400:
                 last = {"status_code": r.status_code, "body": r.text, "params_tried": {"response_id": response_id}}
-                time.sleep(0.7)
-                continue
+                time.sleep(0.7); continue
 
             try:
                 data = r.json()
             except Exception:
-                return {
-                    "backend_raw": r.text,
-                    "polling_with": "response_id",
-                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
-                }
+                return {"backend_raw": r.text, "polling_with": "response_id",
+                        "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}}
 
             last = data
             status = str(data.get("status") or data.get("Status") or "").lower()
             if status in ("done","completed","ok","success","ready","finished") or data.get("done") is True:
-                return {
-                    "backend_final": data,
-                    "polling_with": "response_id",
-                    "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}
-                }
+                return {"backend_final": data, "polling_with": "response_id",
+                        "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"}}
 
             time.sleep(_get_retry_after(r, data))
-
         except Exception as e:
             last = {"exception": str(e)}
             time.sleep(0.7)
 
-    return {
-        "backend_fetch_timeout": True,
-        "last": last,
-        "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
-        "polling_with": "response_id"
-    }
+    return {"backend_fetch_timeout": True, "last": last,
+            "fetch_target": {"mode": "id", "id": response_id, "id_hint": "response_id"},
+            "polling_with": "response_id"}
 
 def _json_error(status: int, code: str, message: str, details: Optional[Dict[str, Any]] = None):
     payload = {"status": "error", "error": {"code": code, "message": message}, "correlation_id": g.get("cid")}
@@ -483,14 +497,14 @@ def _json_error(status: int, code: str, message: str, details: Optional[Dict[str
         payload["details"] = details
     return jsonify(payload), status
 
-# ==================== Hooks ====================
+# ==================== Hooks & routes ====================
 
 @app.before_request
 def _before():
     g.cid = request.headers.get("x-request-id") or str(uuid.uuid4())
-    if request.endpoint in ("adapter", "ingest_alias"):
+    if request.endpoint == "adapter":
         ctype = (request.content_type or "").lower()
-        if request.method == "POST" and "application/json" not in ctype:
+        if "application/json" not in ctype:
             return _json_error(415, "unsupported_media_type", "Content-Type must be application/json")
 
 @app.after_request
@@ -500,11 +514,9 @@ def _after(resp):
     resp.headers["X-Frame-Options"] = "DENY"
     return resp
 
-# ==================== Routes ====================
-
 @app.get("/")
-def index():
-    return jsonify({"status": "ok", "message": "Adapter is running. Use POST /adapter"}), 200
+def root():
+    return jsonify({"status": "ok", "message": "Adapter is running. Use POST /adapter"})
 
 @app.get("/health")
 def health():
@@ -516,14 +528,10 @@ def ready():
         return _json_error(503, "not_ready", "Mapping not loaded")
     return jsonify({"status": "ok"})
 
-@app.get("/adapter")
-def adapter_get_hint():
-    return jsonify({"message": "Use POST /adapter with JSON body"}), 405
-
 @app.post("/adapter")
 def adapter():
     if API_KEY_REQUIRED:
-        err = _require_api_key(request.headers)  # type: ignore[arg-type]
+        err = _require_api_key(request.headers)
         if err:
             return _json_error(401, "unauthorized", err)
     if MAPPING is None:
@@ -544,6 +552,7 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
+    # Normalization-only shortcut
     if str(payload.get("normalize_only", "")).lower() in ("1","true","yes"):
         return jsonify({
             "status": "ok",
@@ -573,6 +582,7 @@ def adapter():
         "correlation_id": g.cid,
     }
 
+    # Small cleanups for UI
     if isinstance(result_payload.get("backend"), dict):
         bt = result_payload["backend"]
         if isinstance(bt.get("fetch_target"), dict):
@@ -581,13 +591,6 @@ def adapter():
             bt["polling_with"] = "response_id" if bt.get("polling_with") else None
 
     return jsonify(result_payload)
-
-# Alias to keep old clients (e.g., Postman saved as /ingest) working
-@app.post("/ingest")
-def ingest_alias():
-    return adapter()
-
-# ==================== Main ====================
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
