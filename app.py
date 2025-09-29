@@ -30,11 +30,10 @@ MAX_CONTENT_LENGTH  = int(_getenv("MAX_CONTENT_LENGTH", str(512 * 1024)))
 LOG_LEVEL           = _getenv("LOG_LEVEL", "INFO").upper()
 LOG_XML_ALWAYS      = _getenv("LOG_XML_ALWAYS", "false").lower() == "true"
 
-# —— NEW: behaviour switches ——————————————————————————
+# behavior switches
 REQUIRE_ONLY_USER_FIELDS = _getenv("REQUIRE_ONLY_USER_FIELDS", "true").lower() == "true"
 POSITIONAL_QA_ENABLED    = _getenv("POSITIONAL_QA_ENABLED", "true").lower() == "true"
 REQUIRE_RESULT_KEY       = _getenv("REQUIRE_RESULT_KEY", "true").lower() == "true"
-# ————————————————————————————————————————————————————
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -208,7 +207,6 @@ def _require_api_key(headers: Dict[str, str]) -> Optional[str]:
         return "Missing API key header 'x-api-key'."
     return None
 
-# —— NEW: only-user-fields enforcement ————————————————
 def _require_user_fields(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     missing = []
     if not (user.get("full_name") or "").strip():
@@ -225,7 +223,6 @@ def _require_user_fields(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if missing:
         return {"error": "Mandatory user fields missing", "missing": missing}
     return None
-# ————————————————————————————————————————————————
 
 def _ensure_list_qas(raw_qas: Any) -> List[Any]:
     """
@@ -266,7 +263,6 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
         "test_mode":    payload.get("test_mode") or "live",
     }
 
-    # NEW: only user fields mandatory
     uf_err = _require_user_fields(user)
     if uf_err:
         raise ValueError(json.dumps(uf_err))
@@ -279,7 +275,6 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
     normalized: List[Dict[str, Any]] = []
     seen = set()
 
-    # flexible extraction for dict-like entries
     answers_only_buffer: List[str] = []
     for item in raw_qas:
         if isinstance(item, str):
@@ -302,7 +297,6 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
             })
             seen.add(q_key)
 
-    # NEW: positional mapping for answers-only shapes
     if POSITIONAL_QA_ENABLED and answers_only_buffer:
         order_keys = mapping.must_have_keys[:] if mapping.must_have_keys else list(mapping.questions.keys())
         for idx, ans in enumerate(answers_only_buffer):
@@ -317,13 +311,11 @@ def _validate(payload: Dict[str, Any], mapping: Mapping) -> Tuple[Dict[str, Any]
             })
             seen.add(q_key)
 
-    # Conditional example: enforce relation only if that key exists
     purchasing = next((x for x in normalized if x["key"] == "q1_purchasing_for"), None)
     if purchasing and purchasing["answer_text"].strip().lower() == "others" and "q1b_relation" not in seen:
         if "q1b_relation" in mapping.questions:
             raise ValueError(json.dumps({"error": "Mandatory question missing", "missing_keys": ["q1b_relation"]}))
 
-    # If we explicitly want to also enforce mapping.must_have_keys, toggle via env
     if not REQUIRE_ONLY_USER_FIELDS:
         missing = [k for k in mapping.must_have_keys if k not in seen]
         if missing:
@@ -496,9 +488,9 @@ def _json_error(status: int, code: str, message: str, details: Optional[Dict[str
 @app.before_request
 def _before():
     g.cid = request.headers.get("x-request-id") or str(uuid.uuid4())
-    if request.endpoint == "adapter":
+    if request.endpoint in ("adapter", "ingest_alias"):
         ctype = (request.content_type or "").lower()
-        if "application/json" not in ctype:
+        if request.method == "POST" and "application/json" not in ctype:
             return _json_error(415, "unsupported_media_type", "Content-Type must be application/json")
 
 @app.after_request
@@ -510,6 +502,10 @@ def _after(resp):
 
 # ==================== Routes ====================
 
+@app.get("/")
+def index():
+    return jsonify({"status": "ok", "message": "Adapter is running. Use POST /adapter"}), 200
+
 @app.get("/health")
 def health():
     return jsonify({"status": "ok", "service": "adapter", "backend": BACKEND_BASE_URL})
@@ -520,10 +516,14 @@ def ready():
         return _json_error(503, "not_ready", "Mapping not loaded")
     return jsonify({"status": "ok"})
 
+@app.get("/adapter")
+def adapter_get_hint():
+    return jsonify({"message": "Use POST /adapter with JSON body"}), 405
+
 @app.post("/adapter")
 def adapter():
     if API_KEY_REQUIRED:
-        err = _require_api_key(request.headers)
+        err = _require_api_key(request.headers)  # type: ignore[arg-type]
         if err:
             return _json_error(401, "unauthorized", err)
     if MAPPING is None:
@@ -544,7 +544,6 @@ def adapter():
         except Exception:
             return _json_error(400, "validation_error", str(ve))
 
-    # NOTE: even if qas is empty, we proceed to backend call (as requested)
     if str(payload.get("normalize_only", "")).lower() in ("1","true","yes"):
         return jsonify({
             "status": "ok",
@@ -583,8 +582,12 @@ def adapter():
 
     return jsonify(result_payload)
 
+# Alias to keep old clients (e.g., Postman saved as /ingest) working
+@app.post("/ingest")
+def ingest_alias():
+    return adapter()
+
 # ==================== Main ====================
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
-
