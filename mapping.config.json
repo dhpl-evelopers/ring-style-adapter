@@ -1,144 +1,86 @@
 {
-  "answers_only_order": [
-    "q1_purchasing_for", "gender", "profession", "occasion", "purpose",
-    "typical_day", "weekend", "dress_work", "dress_social",
-    "trip_style", "waiting_line", "see_painting", "mother_unwell", "last_minute_plans"
+  "allow_unknown_questions": false,
+  "must_have_questions_keys": [
+    "q1_purchasing_for",
+    "q1b_relation",
+    "q2_gender",
+    "q3_profession",
+    "q4_occasion",
+    "q5_purpose",
+    "q6_typical_day",
+    "q7_weekends",
+    "q8_dress_work",
+    "q9_dress_social",
+    "q10_trip_org",
+    "q11_waiting_line",
+    "q12_painting",
+    "q13_mother_meeting",
+    "q14_last_minute"
   ],
-  "questions": [
-    {
-      "canonical_key": "q1_purchasing_for",
-      "matchers": ["Who are you purchasing for?","Who are you buying for?"],
-      "required": true,
-      "options": {
-        "Self": ["Self","Myself"],
-        "Others": ["Others","Someone else"]
-      }
+  "questions": {
+    "q1_purchasing_for": {
+      "canonical_label": "Who are you purchasing for?",
+      "labels": ["Who are you purchasing for", "Purchasing for", "Buying for"],
+      "options": ["Self", "Others"]
     },
-    {
-      "canonical_key": "gender",
-      "matchers": ["Gender","Gender of the person you are buying for"],
-      "required": true,
-      "options": {
-        "Male": ["Male","M"],
-        "Female": ["Female","F"]
-      }
+    "q1b_relation": {
+      "canonical_label": "Your relation to the person you are buying for",
+      "labels": ["Relation", "Relationship", "Your relation to the person you are buying for"],
+      "options": ["Mother","Father","Brother","Sister","Wife","Husband","Boyfriend","Girlfriend","Friend","Colleague","Other","Others"]
     },
-    {
-      "canonical_key": "profession",
-      "matchers": ["Profession","His Profession","Her Profession"],
-      "required": true,
-      "options": {
-        "Knowledge Based: IT/ Marketing/ Architect/ Lawyer/ Teacher/ Accountant": [
-          "Knowledge Based: IT/ Marketing/ Architect/ Lawyer/ Teacher/ Accountant","IT","Lawyer","Teacher"
-        ],
-        "Skill Based/Manual: Home-maker/ Baker/ Make-up Artist/ Graphics & VFX/ Photographer": [
-          "Skill Based/Manual: Home-maker/ Baker/ Make-up Artist/ Graphics & VFX/ Photographer","Home-maker","Photographer"
-        ],
-        "Creative: Interior Designer/ Content Writer/ Fashion Designer/ UI-UX Designer": [
-          "Creative: Interior Designer/ Content Writer/ Fashion Designer/ UI-UX Designer","Interior Designer","UI-UX Designer"
-        ],
-        "Service & Hospitality: Retail Sales Person/ Hotel Staff/ Flight Attendants/ Chefs/ Nurses": [
-          "Service & Hospitality: Retail Sales Person/ Hotel Staff/ Flight Attendants/ Chefs/ Nurses","Hotel Staff","Nurse"
-        ],
-        "Entrepreneur & Executive: Founder/ CEO/ CXO/ Board Member": [
-          "Entrepreneur & Executive: Founder/ CEO/ CXO/ Board Member","Founder","CEO","CXO","Board Member"
-        ],
-        "Business Owner: Proprietor/ Partner": [
-          "Business Owner: Proprietor/ Partner","Proprietor","Partner"
-        ]
-      }
+    "q2_gender": {
+      "canonical_label": "Gender",
+      "labels": ["Gender", "Sex"],
+      "options": ["Male", "Female", "Other"]
     },
-    {
-      "canonical_key": "occasion",
-      "matchers": ["Occasion","The Occasion you are buying the ring for"],
-      "required": true,
-      "options": {
-        "Anniversary": ["Anniversary"],
-        "Birthday": ["Birthday"],
-        "Engagement": ["Engagement"],
-        "Graduation": ["Graduation"],
-        "Self-Gift": ["Self-Gift","Self Gift"],
-        "Festive/Function": ["Festive/Function","Festive","Function"],
-        "Wedding": ["Wedding"],
-        "First Salary": ["First Salary"],
-        "Celebrating a win": ["Celebrating a win"]
-      }
+    "q3_profession": {
+      "canonical_label": "Profession",
+      "labels": ["Profession", "Occupation"]
     },
-    {
-      "canonical_key": "purpose",
-      "matchers": ["Purpose","The Purpose for which the ring is needed"],
-      "required": true,
-      "options": {
-        "Office wear": ["Office wear"],
-        "Daily wear": ["Daily wear","Daily"],
-        "Party-wear": ["Party-wear","Party wear"],
-        "Astrology": ["Astrology"],
-        "Investment": ["Investment"]
-      }
+    "q4_occasion": {
+      "canonical_label": "Occasion",
+      "labels": ["Occasion", "Event"]
     },
-    { "canonical_key":"typical_day", "matchers":["How would you describe your typical day?","How would you describe his typical day?","How would you describe her typical day?"], "required": true,
-      "options":{
-        "Calendarized Set Routine":["Calendarized Set Routine"],
-        "Busy With a lot of Activities":["Busy With a lot of Activities","Busy"],
-        "Spontaneous & Free Spirited":["Spontaneous & Free Spirited"],
-        "Relaxed & Undisturbed":["Relaxed & Undisturbed"]
-      }
+    "q5_purpose": {
+      "canonical_label": "Purpose",
+      "labels": ["Purpose", "Use case"],
+      "options": ["Daily wear","Office wear","Festive","Party","Casual"]
     },
-    { "canonical_key":"weekend", "matchers":["How do you prefer to spend your weekends?","How does he prefer to spend his weekends?","How does she prefer to spend her weekends?"], "required": true,
-      "options":{
-        "Relaxing at Home Solo":["Relaxing at Home Solo"],
-        "Going out & socialising":["Going out & socialising"],
-        "Engaging in Hobbies":["Engaging in Hobbies"],
-        "Hustle to build out of your passion":["Hustle to build out of your passion"]
-      }
+    "q6_typical_day": {
+      "canonical_label": "How would you describe your typical day?",
+      "labels": ["Typical day", "Describe your day"]
     },
-    { "canonical_key":"dress_work", "matchers":["How do you typically dress for work?","How does he typically dress for work?","How does she typically dress for work?"], "required": true,
-      "options":{
-        "Business Formals: Tie-Suit/ Skirt Blazer":["Business Formals: Tie-Suit/ Skirt Blazer"],
-        "Business Casuals: Shirt-Pants/ Trouser":["Business Casuals: Shirt-Pants/ Trouser"],
-        "Everyday Wear: Jeans & T-Shirt":["Everyday Wear: Jeans & T-Shirt"],
-        "Comfort Clothing: Lounge Wear":["Comfort Clothing: Lounge Wear"],
-        "Stylish & Chic: Designer Clothing":["Stylish & Chic: Designer Clothing"]
-      }
+    "q7_weekends": {
+      "canonical_label": "How do you prefer to spend your weekends?",
+      "labels": ["Weekends", "Weekend preference"]
     },
-    { "canonical_key":"dress_social", "matchers":["How do you typically dress for social events?","How does he typically dress for social events?","How does she typically dress for social events?"], "required": true,
-      "options":{
-        "Formals: Tie-Suit & Gown":["Formals: Tie-Suit & Gown"],
-        "Semi-Formals: Shirt-Pant & Dresses":["Semi-Formals: Shirt-Pant & Dresses"],
-        "Everyday Wear: Jeans & T-Shirt":["Everyday Wear: Jeans & T-Shirt"],
-        "Comfort Clothing: Lounge Wear":["Comfort Clothing: Lounge Wear"],
-        "Stylish & Chic: Designer Clothing":["Stylish & Chic: Designer Clothing"]
-      }
+    "q8_dress_work": {
+      "canonical_label": "How do you typically dress for work?",
+      "labels": ["Dress for work","Work attire"]
     },
-    { "canonical_key":"trip_style", "matchers":["On a trip, how do you like to organize things?","On a trip, how does he like to organize things?","On a trip, how does she like to organize things?"], "required": true,
-      "options":{
-        "You use an itinerary and adjust it":["You use an itinerary and adjust it","Follow itinerary & tweak"],
-        "You plan everything yourself from scratch":["You plan everything yourself from scratch","Plan from scratch"]
-      }
+    "q9_dress_social": {
+      "canonical_label": "How do you typically dress for social events?",
+      "labels": ["Dress for social events","Social attire"]
     },
-    { "canonical_key":"waiting_line", "matchers":["You are waiting in a long line","He is waiting in a long line","She is waiting in a long line"], "required": true,
-      "options":{
-        "You will talk to people nearby":["You will talk to people nearby","Talk to people"],
-        "You prefer to be on your own":["You prefer to be on your own","Stay alone"]
-      }
+    "q10_trip_org": {
+      "canonical_label": "On a trip, how do you like to organize things?",
+      "labels": ["Trip organization","Organize on a trip"]
     },
-    { "canonical_key":"see_painting", "matchers":["Whenever you see a painting","Whenever he sees a piece of artwork","Whenever she sees a piece of artwork"], "required": true,
-      "options":{
-        "You focus on the artistic details":["You focus on the artistic details","Artistic details"],
-        "You value the meaning of the art & origin":["You value the meaning of the art & origin","Meaning & origin"]
-      }
+    "q11_waiting_line": {
+      "canonical_label": "You are waiting in a long line",
+      "labels": ["Waiting in a long line","Long line"]
     },
-    { "canonical_key":"mother_unwell", "matchers":["Your mother is not felling well & you have an important meeting to drive","He has an important meeting to attend but his mother is unwell","She has an important meeting to attend but her mother is unwell"], "required": true,
-      "options":{
-        "You will cancel the meeting to care for your mother":["You will cancel the meeting to care for your mother","Cancel meeting & care"],
-        "You will arrange care for your mother & attend the meeting":["You will arrange care for your mother & attend the meeting","Arrange care & attend"]
-      }
+    "q12_painting": {
+      "canonical_label": "Whenever you see a painting",
+      "labels": ["See a painting","Painting preference"]
     },
-    { "canonical_key":"last_minute_plans", "matchers":["Last minute plans","How does he react to last minute plans?","How does she react to last minute plans?"], "required": true,
-      "options":{
-        "You love them & adjust your day to accommodate the plan":["You love them & adjust your day to accommodate the plan","Love & adjust"],
-        "You dislike last-minute plans & prefer planning ahead":["You dislike last-minute plans & prefer planning ahead","Dislike last-minute"]
-      }
+    "q13_mother_meeting": {
+      "canonical_label": "Your mother is not felling well & you have an important meeting to drive",
+      "labels": ["Mother not well and meeting","Mother & meeting"]
+    },
+    "q14_last_minute": {
+      "canonical_label": "Last minute plans",
+      "labels": ["Last-minute plans","Last minute"]
     }
-  ]
+  }
 }
